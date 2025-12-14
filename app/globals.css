@@ -1,0 +1,72 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}
+
+html {
+  height: 100%;
+  overflow-y: auto;
+}
+
+body {
+  color: var(--foreground);
+  background: var(--background);
+  font-family: 'Calibri', 'Segoe UI', Arial, Helvetica, sans-serif;
+  margin: 0;
+  padding: 0;
+  min-height: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
+  font-size: 11px;
+}
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+}
+
+/* Excel-like scrollbar styling */
+::-webkit-scrollbar {
+  width: 17px;
+  height: 17px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f1f1;
+  border-left: 1px solid #d0d0d0;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #c1c1c1;
+  border: 1px solid #a8a8a8;
+  border-radius: 0;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #a8a8a8;
+}
+
+::-webkit-scrollbar-corner {
+  background: #f1f1f1;
+  border-top: 1px solid #d0d0d0;
+  border-left: 1px solid #d0d0d0;
+}
+
+/* Prevent text selection in headers */
+th {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
