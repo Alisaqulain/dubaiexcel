@@ -47,7 +47,16 @@ async function handleToggleActive(
   }
 }
 
-export const POST = withAdmin(handleToggleActive);
+// Wrapper to handle Next.js dynamic route context
+export async function POST(
+  req: NextRequest,
+  context: { params: Promise<{ id: string }> | { id: string } }
+) {
+  const handler = withAdmin(async (authReq: AuthenticatedRequest) => {
+    return handleToggleActive(authReq, context);
+  });
+  return handler(req);
+}
 
 
 

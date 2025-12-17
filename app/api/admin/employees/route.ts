@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import connectDB from '@/lib/mongodb';
-import { withAdmin, AuthenticatedRequest } from '@/lib/middleware';
+import { withAdmin, withViewAccess, AuthenticatedRequest } from '@/lib/middleware';
 import Employee from '@/models/Employee';
 
 async function handleGetEmployees(req: NextRequest) {
@@ -71,6 +71,8 @@ async function handleCreateEmployee(req: AuthenticatedRequest) {
   }
 }
 
-export const GET = withAdmin(handleGetEmployees);
+// GET allows view access for all authenticated users (admin, super-admin, e1-user)
+export const GET = withViewAccess(handleGetEmployees);
+// POST requires admin or super-admin
 export const POST = withAdmin(handleCreateEmployee);
 

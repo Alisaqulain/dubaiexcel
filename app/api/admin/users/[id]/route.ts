@@ -6,7 +6,7 @@ import bcrypt from 'bcryptjs';
 
 // GET /api/admin/users/:id - Get user by ID
 async function handleGetUser(
-  req: NextRequest,
+  req: AuthenticatedRequest,
   context: { params: Promise<{ id: string }> | { id: string } }
 ) {
   try {
@@ -52,6 +52,22 @@ async function handleUpdateUser(
       return NextResponse.json(
         { error: 'User not found' },
         { status: 404 }
+      );
+    }
+
+    // Only super-admin can assign super-admin role
+    if (role === 'super-admin' && req.user?.role !== 'super-admin') {
+      return NextResponse.json(
+        { error: 'Only super-admin can assign super-admin role' },
+        { status: 403 }
+      );
+    }
+
+    // Prevent non-super-admin from changing existing super-admin role
+    if (user.role === 'super-admin' && role !== 'super-admin' && req.user?.role !== 'super-admin') {
+      return NextResponse.json(
+        { error: 'Only super-admin can modify super-admin users' },
+        { status: 403 }
       );
     }
 
@@ -128,7 +144,34 @@ async function handleDeleteUser(
   }
 }
 
-export const GET = withAdmin(handleGetUser);
-export const PUT = withAdmin(handleUpdateUser);
-export const DELETE = withAdmin(handleDeleteUser);
+// Wrappers to handle Next.js dynamic route context
+export async function GET(
+  req: NextRequest,
+  context: { params: Promise<{ id: string }> | { id: string } }
+) {
+  const handler = withAdmin(async (authReq: AuthenticatedRequest) => {
+    return handleGetUser(authReq, context);
+  });
+  return handler(req);
+}
+
+export async function PUT(
+  req: NextRequest,
+  context: { params: Promise<{ id: string }> | { id: string } }
+) {
+  const handler = withAdmin(async (authReq: AuthenticatedRequest) => {
+    return handleUpdateUser(authReq, context);
+  });
+  return handler(req);
+}
+
+export async function DELETE(
+  req: NextRequest,
+  context: { params: Promise<{ id: string }> | { id: string } }
+) {
+  const handler = withAdmin(async (authReq: AuthenticatedRequest) => {
+    return handleDeleteUser(authReq, context);
+  });
+  return handler(req);
+}
 

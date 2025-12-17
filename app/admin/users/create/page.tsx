@@ -16,11 +16,12 @@ export default function CreateUserPage() {
 }
 
 function CreateUserComponent() {
+  const { user: currentUser } = useAuth();
   const [formData, setFormData] = useState({
     fullName: '',
     email: '',
     password: '',
-    role: 'e1-user' as 'admin' | 'e1-user',
+    role: 'e1-user' as 'super-admin' | 'admin' | 'e1-user',
     isActive: true,
     canUpload: true,
   });
@@ -116,11 +117,14 @@ function CreateUserComponent() {
               </label>
               <select
                 value={formData.role}
-                onChange={(e) => setFormData({ ...formData, role: e.target.value as 'admin' | 'e1-user' })}
+                onChange={(e) => setFormData({ ...formData, role: e.target.value as 'super-admin' | 'admin' | 'e1-user' })}
                 className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
               >
                 <option value="e1-user">E1 User</option>
                 <option value="admin">Admin</option>
+                {currentUser?.role === 'super-admin' && (
+                  <option value="super-admin">Super Admin</option>
+                )}
               </select>
             </div>
 
@@ -168,6 +172,10 @@ function CreateUserComponent() {
     </div>
   );
 }
+
+
+
+
 
 
 

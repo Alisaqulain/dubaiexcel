@@ -9,7 +9,8 @@ export default function LoginPage() {
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const { login } = useAuth();
+  const [isRegister, setIsRegister] = useState(false);
+  const { login, register } = useAuth();
   const router = useRouter();
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -18,7 +19,11 @@ export default function LoginPage() {
     setLoading(true);
 
     try {
-      await login(email, password);
+      if (isRegister) {
+        await register(email, password);
+      } else {
+        await login(email, password);
+      }
       router.push('/dashboard');
     } catch (err: any) {
       setError(err.message || 'Authentication failed');
@@ -31,11 +36,8 @@ export default function LoginPage() {
     <div className="min-h-screen flex items-center justify-center bg-gray-100">
       <div className="max-w-md w-full bg-white rounded-lg shadow-md p-8">
         <h1 className="text-3xl font-bold text-center mb-6 text-gray-900">
-          Login
+          {isRegister ? 'Register' : 'Login'}
         </h1>
-        <p className="text-center text-sm text-gray-600 mb-6">
-          Only admin can create accounts. Contact your administrator for access.
-        </p>
 
         {error && (
           <div className="mb-4 p-3 bg-red-100 border border-red-400 text-red-700 rounded">
@@ -75,9 +77,19 @@ export default function LoginPage() {
             disabled={loading}
             className="w-full bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {loading ? 'Processing...' : 'Login'}
+            {loading ? 'Processing...' : isRegister ? 'Register' : 'Login'}
           </button>
         </form>
+
+        <div className="mt-4 text-center">
+          <button
+            type="button"
+            onClick={() => setIsRegister(!isRegister)}
+            className="text-blue-600 hover:text-blue-800 text-sm"
+          >
+            {isRegister ? 'Already have an account? Login' : "Don't have an account? Register"}
+          </button>
+        </div>
       </div>
     </div>
   );

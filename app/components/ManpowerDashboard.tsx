@@ -1,9 +1,6 @@
-
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
-import { useAuth } from '../context/AuthContext';
-import Link from 'next/link';
+import { useEffect, useState } from 'react';
 import {
   BarChart,
   Bar,
@@ -49,32 +46,22 @@ export default function ManpowerDashboard() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const { user } = useAuth();
 
-  const fetchDashboardData = useCallback(async () => {
-    if (!user) {
-      setLoading(false);
-      return;
-    }
+  useEffect(() => {
+    fetchDashboardData();
+  }, []);
 
+  const fetchDashboardData = async () => {
     try {
       const token = localStorage.getItem('token');
-      // Use admin dashboard for admin users, regular dashboard for others
-      const apiEndpoint = user.role === 'admin' ? '/api/admin/dashboard' : '/api/dashboard';
-      
-      const response = await fetch(apiEndpoint, {
+      const response = await fetch('/api/admin/dashboard', {
         headers: {
           'Authorization': `Bearer ${token}`,
         },
       });
       const result = await response.json();
       if (!response.ok) {
-        // If access denied, show user-friendly message
-        if (response.status === 403) {
-          setError('ACCESS_DENIED');
-          return;
-        }
-        throw new Error(result.message || result.error || 'Failed to fetch dashboard data');
+        throw new Error(result.error || 'Failed to fetch dashboard data');
       }
       setData(result.data);
     } catch (err: any) {
@@ -82,130 +69,20 @@ export default function ManpowerDashboard() {
     } finally {
       setLoading(false);
     }
-  }, [user]);
-
-  useEffect(() => {
-    if (user) {
-      fetchDashboardData();
-    }
-  }, [user, fetchDashboardData]);
+  };
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center min-h-screen bg-gray-50">
-        <div className="text-center">
-          <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mb-4"></div>
-          <div className="text-xl text-gray-600">Loading dashboard...</div>
-        </div>
-      </div>
-    );
-  }
-
-  if (error === 'ACCESS_DENIED' || (error && error.includes('Access Denied'))) {
-    return (
-      <div className="min-h-screen bg-gray-50 p-6">
-        <div className="max-w-2xl mx-auto">
-          <div className="bg-white rounded-lg shadow-lg p-8 text-center">
-            <div className="mb-6">
-              <svg
-                className="mx-auto h-16 w-16 text-yellow-500"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
-                />
-              </svg>
-            </div>
-            
-            <h1 className="text-2xl font-bold text-gray-900 mb-4">
-              Dashboard Access
-            </h1>
-            
-            <p className="text-gray-600 mb-6">
-              The full analytics dashboard is available to administrators only. As an employee, you can upload and create Excel files, which will be visible to administrators.
-            </p>
-
-            <div className="bg-blue-50 border border-blue-200 rounded-md p-4 mb-6">
-              <p className="text-sm text-blue-800">
-                <strong>Your Role:</strong> {user?.role === 'admin' ? 'Administrator' : 'Employee'}
-              </p>
-            </div>
-
-            <div className="space-y-3">
-              <Link
-                href="/excel"
-                className="block w-full bg-blue-600 text-white py-3 px-4 rounded-md hover:bg-blue-700 transition-colors font-medium"
-              >
-                Go to Excel Interface
-              </Link>
-              
-              {user?.role === 'admin' && (
-                <p className="text-sm text-gray-500 mt-4">
-                  If you&apos;re an admin but seeing this message, please refresh the page or contact support.
-                </p>
-              )}
-            </div>
-          </div>
-        </div>
+      <div className="flex items-center justify-center min-h-screen">
+        <div className="text-xl">Loading dashboard...</div>
       </div>
     );
   }
 
   if (error || !data) {
     return (
-      <div className="min-h-screen bg-gray-50 p-6">
-        <div className="max-w-2xl mx-auto">
-          <div className="bg-white rounded-lg shadow-lg p-8 text-center">
-            <div className="mb-6">
-              <svg
-                className="mx-auto h-16 w-16 text-gray-400"
-                fill="none"
-                stroke="currentColor"
-                viewBox="0 0 24 24"
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  strokeWidth={2}
-                  d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"
-                />
-              </svg>
-            </div>
-            
-            <h1 className="text-2xl font-bold text-gray-900 mb-4">
-              Unable to Load Dashboard
-            </h1>
-            
-            <p className="text-gray-600 mb-6">
-              {error || 'We encountered an issue loading the dashboard data. Please try again later.'}
-            </p>
-
-            <div className="space-y-3">
-              <button
-                onClick={() => {
-                  setLoading(true);
-                  setError(null);
-                  fetchDashboardData();
-                }}
-                className="block w-full bg-blue-600 text-white py-3 px-4 rounded-md hover:bg-blue-700 transition-colors font-medium"
-              >
-                Try Again
-              </button>
-              
-              <Link
-                href="/excel"
-                className="block w-full bg-gray-100 text-gray-700 py-3 px-4 rounded-md hover:bg-gray-200 transition-colors font-medium"
-              >
-                Go to Excel Interface
-              </Link>
-            </div>
-          </div>
-        </div>
+      <div className="flex items-center justify-center min-h-screen">
+        <div className="text-xl text-red-600">Error: {error || 'Failed to load data'}</div>
       </div>
     );
   }
@@ -266,7 +143,7 @@ export default function ManpowerDashboard() {
   });
 
   return (
-    <div className="min-h-screen bg-gray-50 p-6 overflow-y-auto">
+    <div className="min-h-screen bg-gray-50 p-6">
       <div className="max-w-[1920px] mx-auto">
         {/* Header */}
         <div className="bg-white rounded-lg shadow-md p-6 mb-6">

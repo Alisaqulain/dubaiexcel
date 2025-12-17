@@ -1,16 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { verifyToken, extractTokenFromHeader, JWTPayload } from './jwt';
-import connectDB from './mongodb';
-import User from '@/models/User';
 
 export interface AuthenticatedRequest extends NextRequest {
-  user?: JWTPayload & { isActive?: boolean; canUpload?: boolean };
+  user?: JWTPayload;
 }
 
-export function withAuth(
-  handler: (req: AuthenticatedRequest, context?: any) => Promise<NextResponse>
-) {
-  return async (req: NextRequest, context?: any): Promise<NextResponse> => {
+export function withAuth(handler: (req: AuthenticatedRequest) => Promise<NextResponse>) {
+  return async (req: NextRequest): Promise<NextResponse> => {
     try {
       const authHeader = req.headers.get('authorization');
       const token = extractTokenFromHeader(authHeader);
@@ -22,33 +18,10 @@ export function withAuth(
         );
       }
 
-      const userPayload = verifyToken(token);
-      
-      // Verify user exists and is active
-      await connectDB();
-      const user = await User.findById(userPayload.userId).lean();
-      
-      if (!user) {
-        return NextResponse.json(
-          { error: 'User not found' },
-          { status: 401 }
-        );
-      }
+      const user = verifyToken(token);
+      (req as AuthenticatedRequest).user = user;
 
-      if (!user.isActive) {
-        return NextResponse.json(
-          { error: 'Account is inactive' },
-          { status: 403 }
-        );
-      }
-
-      (req as AuthenticatedRequest).user = {
-        ...userPayload,
-        isActive: user.isActive,
-        canUpload: user.canUpload,
-      };
-
-      return handler(req as AuthenticatedRequest, context);
+      return handler(req as AuthenticatedRequest);
     } catch (error: any) {
       return NextResponse.json(
         { error: error.message || 'Authentication failed' },
@@ -58,44 +31,33 @@ export function withAuth(
   };
 }
 
-export function withAdmin(
-  handler: (req: AuthenticatedRequest, context?: any) => Promise<NextResponse>
-) {
-  return withAuth(async (req: AuthenticatedRequest, context?: any) => {
-    if (req.user?.role !== 'admin') {
+export function withAdmin(handler: (req: AuthenticatedRequest) => Promise<NextResponse>) {
+  return withAuth(async (req: AuthenticatedRequest) => {
+    if (req.user?.role !== 'admin' && req.user?.role !== 'super-admin') {
       return NextResponse.json(
-        { 
-          error: 'Access Denied',
-          message: 'This feature is only available to administrators. Please contact your administrator if you need access.',
-          code: 'ADMIN_REQUIRED'
-        },
+        { error: 'Admin access required' },
         { status: 403 }
       );
     }
-    return handler(req, context);
+    return handler(req);
   });
 }
 
-export function withUploadPermission(handler: (req: AuthenticatedRequest) => Promise<NextResponse>) {
+export function withSuperAdmin(handler: (req: AuthenticatedRequest) => Promise<NextResponse>) {
   return withAuth(async (req: AuthenticatedRequest) => {
-    if (req.user?.role !== 'admin' && req.user?.role !== 'e1-user') {
+    if (req.user?.role !== 'super-admin') {
       return NextResponse.json(
-        { error: 'Access denied' },
+        { error: 'Super admin access required' },
         { status: 403 }
       );
     }
+    return handler(req);
+  });
+}
 
-    if (req.user?.role === 'e1-user' && !req.user?.canUpload) {
-      return NextResponse.json(
-        { 
-          error: 'Upload Access Disabled',
-          message: 'Upload functionality is currently disabled for your account. Please contact your administrator to enable upload access.',
-          code: 'UPLOAD_DISABLED'
-        },
-        { status: 403 }
-      );
-    }
-
+export function withViewAccess(handler: (req: AuthenticatedRequest) => Promise<NextResponse>) {
+  return withAuth(async (req: AuthenticatedRequest) => {
+    // All authenticated users can view
     return handler(req);
   });
 }

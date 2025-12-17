@@ -1,16 +1,18 @@
 'use client';
 
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
+import { usePathname, useSearchParams } from 'next/navigation';
 import { useAuth } from '../context/AuthContext';
 
 export default function Navigation() {
   const { user, logout } = useAuth();
   const pathname = usePathname();
+  const searchParams = useSearchParams();
 
   if (!user) return null;
 
   const isActive = (path: string) => pathname === path;
+  const statusParam = searchParams.get('status');
 
   return (
     <nav className="bg-blue-600 text-white shadow-lg">
@@ -20,24 +22,15 @@ export default function Navigation() {
             <Link href="/dashboard" className="flex items-center px-3 py-2 rounded-md text-sm font-medium hover:bg-blue-700">
               Dashboard
             </Link>
-            {/* Excel Interface - Available to all authenticated users (includes upload and create) */}
-            <Link
-              href="/excel"
-              className={`flex items-center px-3 py-2 rounded-md text-sm font-medium ${
-                isActive('/excel') || isActive('/admin/upload') ? 'bg-blue-800' : 'hover:bg-blue-700'
-              }`}
-            >
-              Excel Interface
-            </Link>
-            {user.role === 'admin' && (
+            {(user.role === 'admin' || user.role === 'super-admin') && (
               <>
                 <Link
-                  href="/admin/users"
+                  href="/admin/upload"
                   className={`flex items-center px-3 py-2 rounded-md text-sm font-medium ${
-                    isActive('/admin/users') ? 'bg-blue-800' : 'hover:bg-blue-700'
+                    isActive('/admin/upload') ? 'bg-blue-800' : 'hover:bg-blue-700'
                   }`}
                 >
-                  Users
+                  Upload
                 </Link>
                 <Link
                   href="/admin/employees"
@@ -45,23 +38,23 @@ export default function Navigation() {
                     isActive('/admin/employees') ? 'bg-blue-800' : 'hover:bg-blue-700'
                   }`}
                 >
-                  Employees
+                  All Employees
                 </Link>
                 <Link
-                  href="/admin/files"
+                  href="/admin/employees?status=active"
                   className={`flex items-center px-3 py-2 rounded-md text-sm font-medium ${
-                    isActive('/admin/files') ? 'bg-blue-800' : 'hover:bg-blue-700'
+                    isActive('/admin/employees') && statusParam === 'active' ? 'bg-blue-800' : 'hover:bg-blue-700'
                   }`}
                 >
-                  All Files
+                  Active Employees
                 </Link>
                 <Link
-                  href="/admin/logs"
+                  href="/admin/employees?status=inactive"
                   className={`flex items-center px-3 py-2 rounded-md text-sm font-medium ${
-                    isActive('/admin/logs') ? 'bg-blue-800' : 'hover:bg-blue-700'
+                    isActive('/admin/employees') && statusParam === 'inactive' ? 'bg-blue-800' : 'hover:bg-blue-700'
                   }`}
                 >
-                  Logs
+                  Inactive Employees
                 </Link>
                 <Link
                   href="/reports/download-excel"
@@ -71,13 +64,25 @@ export default function Navigation() {
                 >
                   Download Excel
                 </Link>
+              </>
+            )}
+            {user.role === 'e1-user' && (
+              <>
                 <Link
-                  href="/admin/clear-data"
+                  href="/admin/employees?status=active"
                   className={`flex items-center px-3 py-2 rounded-md text-sm font-medium ${
-                    isActive('/admin/clear-data') ? 'bg-red-800' : 'hover:bg-red-700'
+                    isActive('/admin/employees') && statusParam === 'active' ? 'bg-blue-800' : 'hover:bg-blue-700'
                   }`}
                 >
-                  Clear Data
+                  Active Employees
+                </Link>
+                <Link
+                  href="/admin/employees?status=inactive"
+                  className={`flex items-center px-3 py-2 rounded-md text-sm font-medium ${
+                    isActive('/admin/employees') && statusParam === 'inactive' ? 'bg-blue-800' : 'hover:bg-blue-700'
+                  }`}
+                >
+                  Inactive Employees
                 </Link>
               </>
             )}

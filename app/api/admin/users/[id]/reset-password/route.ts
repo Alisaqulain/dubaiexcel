@@ -48,7 +48,16 @@ async function handleResetPassword(
   }
 }
 
-export const POST = withAdmin(handleResetPassword);
+// Wrapper to handle Next.js dynamic route context
+export async function POST(
+  req: NextRequest,
+  context: { params: Promise<{ id: string }> | { id: string } }
+) {
+  const handler = withAdmin(async (authReq: AuthenticatedRequest) => {
+    return handleResetPassword(authReq, context);
+  });
+  return handler(req);
+}
 
 
 

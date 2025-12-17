@@ -5,7 +5,7 @@ import { createContext, useContext, useState, useEffect, ReactNode } from 'react
 interface User {
   id: string;
   email: string;
-  role: 'admin' | 'e1-user';
+  role: 'super-admin' | 'admin' | 'e1-user';
   fullName?: string;
   canUpload?: boolean;
 }

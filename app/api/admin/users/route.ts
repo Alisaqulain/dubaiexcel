@@ -72,6 +72,14 @@ async function handleCreateUser(req: AuthenticatedRequest) {
       );
     }
 
+    // Only super-admin can create super-admin users
+    if (role === 'super-admin' && req.user?.role !== 'super-admin') {
+      return NextResponse.json(
+        { error: 'Only super-admin can create super-admin users' },
+        { status: 403 }
+      );
+    }
+
     // Check if user exists
     const existingUser = await User.findOne({ email: email.toLowerCase() });
     if (existingUser) {
@@ -112,6 +120,10 @@ async function handleCreateUser(req: AuthenticatedRequest) {
 
 export const GET = withAdmin(handleGetUsers);
 export const POST = withAdmin(handleCreateUser);
+
+
+
+
 
 
 

@@ -10,7 +10,7 @@ interface User {
   _id: string;
   fullName: string;
   email: string;
-  role: 'admin' | 'e1-user';
+  role: 'super-admin' | 'admin' | 'e1-user';
   isActive: boolean;
   canUpload: boolean;
 }
@@ -31,7 +31,7 @@ function EditUserComponent() {
   const [formData, setFormData] = useState({
     fullName: '',
     email: '',
-    role: 'e1-user' as 'admin' | 'e1-user',
+    role: 'e1-user' as 'super-admin' | 'admin' | 'e1-user',
     isActive: true,
     canUpload: true,
   });
@@ -39,7 +39,7 @@ function EditUserComponent() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
-  const { token } = useAuth();
+  const { token, user: currentUser } = useAuth();
   const router = useRouter();
 
   useEffect(() => {
@@ -183,11 +183,14 @@ function EditUserComponent() {
               </label>
               <select
                 value={formData.role}
-                onChange={(e) => setFormData({ ...formData, role: e.target.value as 'admin' | 'e1-user' })}
+                onChange={(e) => setFormData({ ...formData, role: e.target.value as 'super-admin' | 'admin' | 'e1-user' })}
                 className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
               >
                 <option value="e1-user">E1 User</option>
                 <option value="admin">Admin</option>
+                {currentUser?.role === 'super-admin' && (
+                  <option value="super-admin">Super Admin</option>
+                )}
               </select>
             </div>
 

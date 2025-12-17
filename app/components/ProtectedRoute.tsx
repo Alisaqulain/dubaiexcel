@@ -4,7 +4,17 @@ import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '../context/AuthContext';
 
-export function ProtectedRoute({ children, requireAdmin = false }: { children: React.ReactNode; requireAdmin?: boolean }) {
+export function ProtectedRoute({ 
+  children, 
+  requireAdmin = false,
+  requireSuperAdmin = false,
+  allowViewOnly = false 
+}: { 
+  children: React.ReactNode; 
+  requireAdmin?: boolean;
+  requireSuperAdmin?: boolean;
+  allowViewOnly?: boolean;
+}) {
   const { user, loading } = useAuth();
   const router = useRouter();
 
@@ -12,19 +22,18 @@ export function ProtectedRoute({ children, requireAdmin = false }: { children: R
     if (!loading) {
       if (!user) {
         router.push('/login');
-      } else if (requireAdmin && user.role !== 'admin') {
-        router.push('/unauthorized');
+      } else if (requireSuperAdmin && user.role !== 'super-admin') {
+        router.push('/dashboard');
+      } else if (requireAdmin && user.role !== 'admin' && user.role !== 'super-admin') {
+        router.push('/dashboard');
       }
     }
-  }, [user, loading, requireAdmin, router]);
+  }, [user, loading, requireAdmin, requireSuperAdmin, router]);
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center min-h-screen bg-gray-50">
-        <div className="text-center">
-          <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mb-4"></div>
-          <div className="text-xl text-gray-600">Loading...</div>
-        </div>
+      <div className="flex items-center justify-center min-h-screen">
+        <div className="text-xl">Loading...</div>
       </div>
     );
   }
@@ -33,15 +42,15 @@ export function ProtectedRoute({ children, requireAdmin = false }: { children: R
     return null;
   }
 
-  if (requireAdmin && user.role !== 'admin') {
-    return (
-      <div className="flex items-center justify-center min-h-screen bg-gray-50">
-        <div className="text-center">
-          <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mb-4"></div>
-          <div className="text-xl text-gray-600">Redirecting...</div>
-        </div>
-      </div>
-    );
+  if (requireSuperAdmin && user.role !== 'super-admin') {
+    return null;
+  }
+
+  if (requireAdmin && user.role !== 'admin' && user.role !== 'super-admin') {
+    if (!allowViewOnly) {
+      return null;
+    }
+    // For view-only access, e1-user can view but not edit
   }
 
   return <>{children}</>;
