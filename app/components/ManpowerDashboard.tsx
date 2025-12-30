@@ -1,6 +1,8 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
+import { useAuth } from '../context/AuthContext';
 import {
   BarChart,
   Bar,
@@ -43,6 +45,7 @@ interface DashboardData {
 const COLORS = ['#0088FE', '#00C49F', '#FFBB28', '#FF8042', '#8884d8', '#82ca9d'];
 
 export default function ManpowerDashboard() {
+  const { user } = useAuth();
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -145,6 +148,24 @@ export default function ManpowerDashboard() {
   return (
     <div className="min-h-screen bg-gray-50 p-6">
       <div className="max-w-[1920px] mx-auto">
+        {/* Summary Report Link for Super Admin */}
+        {user?.role === 'super-admin' && (
+          <div className="bg-gradient-to-r from-purple-600 to-blue-600 rounded-lg shadow-lg p-6 mb-6 text-white">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-2xl font-bold mb-2">📊 Manpower Summary Report</h2>
+                <p className="text-purple-100">View comprehensive Excel-style summary report with all sections and breakdowns</p>
+              </div>
+              <Link
+                href="/admin/summary-report"
+                className="bg-white text-purple-600 px-6 py-3 rounded-lg font-semibold hover:bg-purple-50 transition-colors shadow-md"
+              >
+                View Summary Report →
+              </Link>
+            </div>
+          </div>
+        )}
+
         {/* Header */}
         <div className="bg-white rounded-lg shadow-md p-6 mb-6">
           <h1 className="text-3xl font-bold text-gray-900">Summary of Manpower Active Employees</h1>

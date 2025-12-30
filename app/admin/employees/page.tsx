@@ -16,6 +16,8 @@ interface Employee {
   role: string;
   department?: string;
   active: boolean;
+  labourType?: 'OUR_LABOUR' | 'SUPPLY_LABOUR' | 'SUBCONTRACTOR';
+  projectId?: string;
 }
 
 export default function AdminEmployeesPage() {
@@ -45,11 +47,13 @@ function EmployeesComponent() {
   }>>([]);
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'inactive'>('all');
   const [uploading, setUploading] = useState(false);
+  const [editingEmployee, setEditingEmployee] = useState<Employee | null>(null);
+  const [showEditModal, setShowEditModal] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { token, user } = useAuth();
   const searchParams = useSearchParams();
   
-  const canEdit = user?.role === 'admin' || user?.role === 'super-admin';
+  const canEdit = user?.role === 'admin' || user?.role === 'super-admin' || user?.role === 'user';
 
   useEffect(() => {
     fetchEmployees();
@@ -97,11 +101,17 @@ function EmployeesComponent() {
         },
       });
       const result = await response.json();
+      console.log('Fetch employees response:', result);
       if (result.success) {
-        setEmployees(result.data);
+        setEmployees(result.data || []);
+        console.log('Employees loaded:', result.data?.length || 0);
+      } else {
+        console.error('Failed to fetch employees:', result.error);
+        alert(`Error loading employees: ${result.error || 'Unknown error'}`);
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to fetch employees:', err);
+      alert(`Error: ${err.message || 'Failed to fetch employees. Please check your connection.'}`);
     } finally {
       setLoading(false);
     }
@@ -109,6 +119,25 @@ function EmployeesComponent() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    
+    // Validate required fields before submitting
+    const invalidRows = multipleRows.filter((row, index) => {
+      if (!row.empId || !row.name || !row.site || !row.role) {
+        return true;
+      }
+      // Validate siteType
+      const validSiteTypes = ['HEAD_OFFICE', 'MEP', 'CIVIL', 'OTHER', 'OUTSOURCED', 'SUPPORT'];
+      if (row.siteType && !validSiteTypes.includes(row.siteType)) {
+        return true;
+      }
+      return false;
+    });
+
+    if (invalidRows.length > 0) {
+      alert('Please fill in all required fields (Employee ID, Name, Site, Role) for all rows.');
+      return;
+    }
+
     try {
       if (rowCount > 1) {
         // Bulk create multiple employees
@@ -127,9 +156,14 @@ function EmployeesComponent() {
           setRowCount(1);
           setMultipleRows([]);
           fetchEmployees();
-          alert(`Successfully created ${result.data.created} employees`);
+          const message = result.data.failed > 0 
+            ? `Created ${result.data.created} employees. ${result.data.failed} failed:\n${result.data.errors.slice(0, 5).join('\n')}${result.data.errors.length > 5 ? '\n...' : ''}`
+            : `Successfully created ${result.data.created} employees`;
+          alert(message);
         } else {
-          alert(result.error || 'Failed to create employees');
+          const errorMsg = result.error || 'Failed to create employees';
+          console.error('Bulk create error:', errorMsg);
+          alert(`Error: ${errorMsg}`);
         }
       } else {
         // Single employee creation
@@ -148,13 +182,17 @@ function EmployeesComponent() {
           setRowCount(1);
           setMultipleRows([]);
           fetchEmployees();
+          alert('Employee created successfully!');
         } else {
-          alert(result.error || 'Failed to create employee');
+          const errorMsg = result.error || 'Failed to create employee';
+          console.error('Create employee error:', errorMsg);
+          alert(`Error: ${errorMsg}`);
         }
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to create employee:', err);
-      alert('Failed to create employee');
+      const errorMsg = err.message || 'Failed to create employee. Please check your connection and try again.';
+      alert(`Error: ${errorMsg}`);
     }
   };
 
@@ -219,6 +257,83 @@ function EmployeesComponent() {
     const newRows = [...multipleRows];
     newRows[index] = { ...newRows[index], [field]: value };
     setMultipleRows(newRows);
+  };
+
+  const handleEditEmployee = (employee: Employee) => {
+    setEditingEmployee(employee);
+    setShowEditModal(true);
+  };
+
+  const handleUpdateEmployee = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingEmployee) return;
+
+    try {
+      const response = await fetch(`/api/admin/employees/${editingEmployee._id}`, {
+        method: 'PUT',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(editingEmployee),
+      });
+
+      const result = await response.json();
+      if (result.success) {
+        setShowEditModal(false);
+        setEditingEmployee(null);
+        fetchEmployees();
+        alert('Employee updated successfully!');
+      } else {
+        alert(result.error || 'Failed to update employee');
+      }
+    } catch (err: any) {
+      alert(`Error: ${err.message || 'Failed to update employee'}`);
+    }
+  };
+
+  const handleToggleActive = async (employeeId: string) => {
+    try {
+      const response = await fetch(`/api/admin/employees/${employeeId}/toggle-active`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+        },
+      });
+
+      const result = await response.json();
+      if (result.success) {
+        fetchEmployees();
+        alert(result.message || 'Employee status updated!');
+      } else {
+        alert(result.error || 'Failed to update employee status');
+      }
+    } catch (err: any) {
+      alert(`Error: ${err.message || 'Failed to update employee status'}`);
+    }
+  };
+
+  const handleDeleteEmployee = async (employeeId: string) => {
+    if (!confirm('Are you sure you want to delete this employee?')) return;
+
+    try {
+      const response = await fetch(`/api/admin/employees/${employeeId}`, {
+        method: 'DELETE',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+        },
+      });
+
+      const result = await response.json();
+      if (result.success) {
+        fetchEmployees();
+        alert('Employee deleted successfully!');
+      } else {
+        alert(result.error || 'Failed to delete employee');
+      }
+    } catch (err: any) {
+      alert(`Error: ${err.message || 'Failed to delete employee'}`);
+    }
   };
 
   if (loading) {
@@ -454,19 +569,23 @@ function EmployeesComponent() {
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Site Type</th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Role</th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Department</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Labour Type</th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                {canEdit && (
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+                )}
               </tr>
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
               {filteredEmployees.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="px-6 py-4 text-center text-gray-500">
+                  <td colSpan={canEdit ? 9 : 8} className="px-6 py-4 text-center text-gray-500">
                     No employees found
                   </td>
                 </tr>
               ) : (
                 filteredEmployees.map((emp) => (
-                  <tr key={emp._id}>
+                  <tr key={emp._id} className="hover:bg-gray-50">
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{emp.empId}</td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{emp.name}</td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{emp.site}</td>
@@ -475,17 +594,210 @@ function EmployeesComponent() {
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{emp.department || '-'}</td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <span className={`px-2 py-1 text-xs rounded-full ${
+                        emp.labourType === 'OUR_LABOUR' ? 'bg-blue-100 text-blue-800' :
+                        emp.labourType === 'SUPPLY_LABOUR' ? 'bg-green-100 text-green-800' :
+                        'bg-purple-100 text-purple-800'
+                      }`}>
+                        {emp.labourType ? emp.labourType.replace('_', ' ') : 'Our Labour'}
+                      </span>
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap">
+                      <span className={`px-2 py-1 text-xs rounded-full ${
                         emp.active ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
                       }`}>
                         {emp.active ? 'Active' : 'Inactive'}
                       </span>
                     </td>
+                    {canEdit && (
+                      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => handleEditEmployee(emp)}
+                            className="text-blue-600 hover:text-blue-900"
+                            title="Edit"
+                          >
+                            ✏️ Edit
+                          </button>
+                          <button
+                            onClick={() => handleToggleActive(emp._id)}
+                            className={`${
+                              emp.active ? 'text-orange-600 hover:text-orange-900' : 'text-green-600 hover:text-green-900'
+                            }`}
+                            title={emp.active ? 'Deactivate' : 'Activate'}
+                          >
+                            {emp.active ? '⏸️ Deactivate' : '▶️ Activate'}
+                          </button>
+                          <button
+                            onClick={() => handleDeleteEmployee(emp._id)}
+                            className="text-red-600 hover:text-red-900"
+                            title="Delete"
+                          >
+                            🗑️ Delete
+                          </button>
+                        </div>
+                      </td>
+                    )}
                   </tr>
                 ))
               )}
             </tbody>
           </table>
         </div>
+
+        {/* Edit Employee Modal */}
+        {showEditModal && editingEmployee && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div className="bg-white rounded-lg shadow-xl p-6 max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto">
+              <h2 className="text-2xl font-bold mb-4">Edit Employee</h2>
+              <form onSubmit={handleUpdateEmployee} className="space-y-4">
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Employee ID *
+                    </label>
+                    <input
+                      type="text"
+                      value={editingEmployee.empId}
+                      onChange={(e) => setEditingEmployee({ ...editingEmployee, empId: e.target.value })}
+                      required
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Name *
+                    </label>
+                    <input
+                      type="text"
+                      value={editingEmployee.name}
+                      onChange={(e) => setEditingEmployee({ ...editingEmployee, name: e.target.value })}
+                      required
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Site *
+                    </label>
+                    <input
+                      type="text"
+                      value={editingEmployee.site}
+                      onChange={(e) => setEditingEmployee({ ...editingEmployee, site: e.target.value })}
+                      required
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+
+                    <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Site Type *
+                    </label>
+                    <select
+                      value={editingEmployee.siteType}
+                      onChange={(e) => setEditingEmployee({ ...editingEmployee, siteType: e.target.value })}
+                      required
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      <option value="HEAD_OFFICE">Head Office</option>
+                      <option value="MEP">MEP</option>
+                      <option value="CIVIL">Civil</option>
+                      <option value="OTHER">Other</option>
+                      <option value="OUTSOURCED">Outsourced</option>
+                      <option value="SUPPORT">Support</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Labour Type *
+                    </label>
+                    <select
+                      value={editingEmployee.labourType || 'OUR_LABOUR'}
+                      onChange={(e) => setEditingEmployee({ ...editingEmployee, labourType: e.target.value as any })}
+                      required
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      <option value="OUR_LABOUR">Our Labour</option>
+                      <option value="SUPPLY_LABOUR">Supply Labour</option>
+                      <option value="SUBCONTRACTOR">Subcontractor</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Role *
+                    </label>
+                    <input
+                      type="text"
+                      value={editingEmployee.role}
+                      onChange={(e) => setEditingEmployee({ ...editingEmployee, role: e.target.value })}
+                      required
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Department
+                    </label>
+                    <input
+                      type="text"
+                      value={editingEmployee.department || ''}
+                      onChange={(e) => setEditingEmployee({ ...editingEmployee, department: e.target.value })}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Project ID
+                    </label>
+                    <input
+                      type="text"
+                      value={editingEmployee.projectId || ''}
+                      onChange={(e) => setEditingEmployee({ ...editingEmployee, projectId: e.target.value })}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      placeholder="Optional"
+                    />
+                  </div>
+
+                  <div className="col-span-2">
+                    <label className="flex items-center">
+                      <input
+                        type="checkbox"
+                        checked={editingEmployee.active}
+                        onChange={(e) => setEditingEmployee({ ...editingEmployee, active: e.target.checked })}
+                        className="mr-2"
+                      />
+                      <span className="text-sm font-medium text-gray-700">Active</span>
+                    </label>
+                  </div>
+                </div>
+
+                <div className="flex justify-end gap-2 pt-4">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowEditModal(false);
+                      setEditingEmployee(null);
+                    }}
+                    className="px-4 py-2 border border-gray-300 rounded-md text-gray-700 hover:bg-gray-50"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
+                  >
+                    Update Employee
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

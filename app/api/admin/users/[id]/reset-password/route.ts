@@ -32,7 +32,7 @@ async function handleResetPassword(
     }
 
     // Hash new password
-    user.passwordHash = await bcrypt.hash(newPassword, 10);
+    user.password = newPassword; // The pre-save hook will hash it automatically
     await user.save();
 
     return NextResponse.json({

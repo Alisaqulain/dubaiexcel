@@ -2,49 +2,58 @@ import mongoose, { Schema, Document } from 'mongoose';
 import bcrypt from 'bcryptjs';
 
 export interface IUser extends Document {
-  fullName: string;
   email: string;
-  passwordHash: string;
-  role: 'super-admin' | 'admin' | 'e1-user';
-  isActive: boolean;
-  canUpload: boolean;
+  username?: string;
+  password: string;
+  role: 'super-admin' | 'admin' | 'user';
+  name?: string;
+  active: boolean;
+  allottedProjects?: string[]; // Project IDs assigned to this user
   createdAt?: Date;
   updatedAt?: Date;
   comparePassword(candidatePassword: string): Promise<boolean>;
 }
 
 const UserSchema = new Schema<IUser>({
-  fullName: { type: String, required: true, trim: true },
-  email: { type: String, required: true, unique: true, lowercase: true, trim: true, index: true },
-  passwordHash: { type: String, required: true },
-  role: { type: String, enum: ['super-admin', 'admin', 'e1-user'], required: true, default: 'e1-user' },
-  isActive: { type: Boolean, default: true, index: true },
-  canUpload: { type: Boolean, default: true, index: true },
+  email: { type: String, required: true, unique: true, lowercase: true, trim: true },
+  username: { type: String, unique: true, sparse: true, lowercase: true, trim: true },
+  password: { type: String, required: true },
+  role: { type: String, enum: ['super-admin', 'admin', 'user'], required: true, default: 'user' },
+  name: { type: String },
+  active: { type: Boolean, default: true },
+  allottedProjects: [{ type: String }], // Array of project IDs
 }, {
   timestamps: true,
 });
 
 // Hash password before saving
-UserSchema.pre('save', async function() {
-  // Only hash if password is modified and it's not already hashed
-  if (!this.isModified('passwordHash')) {
+UserSchema.pre('save', async function(next: any) {
+  if (!this.isModified('password')) {
+    if (next) next();
     return;
   }
-  
-  // Check if passwordHash is already hashed (starts with $2a$ or $2b$)
-  if (this.passwordHash && (this.passwordHash.startsWith('$2a$') || this.passwordHash.startsWith('$2b$'))) {
-    return;
-  }
-  
-  // Hash the password
-  if (this.passwordHash) {
-    this.passwordHash = await bcrypt.hash(this.passwordHash, 10);
-  }
+  this.password = await bcrypt.hash(this.password, 10);
+  if (next) next();
 });
 
 // Compare password method
 UserSchema.methods.comparePassword = async function(candidatePassword: string): Promise<boolean> {
-  return bcrypt.compare(candidatePassword, this.passwordHash);
+  if (!candidatePassword) {
+    return false;
+  }
+  // Support both 'password' and 'passwordHash' fields for backward compatibility
+  // Use get() to access fields that might not be in the schema
+  const hashedPassword = this.password || this.get('passwordHash') || (this as any).passwordHash;
+  if (!hashedPassword) {
+    console.error('User password field is missing. Available fields:', Object.keys(this.toObject ? this.toObject() : {}));
+    return false;
+  }
+  try {
+    return await bcrypt.compare(candidatePassword, hashedPassword);
+  } catch (error) {
+    console.error('Password comparison error:', error);
+    return false;
+  }
 };
 
 const User = mongoose.models.User || mongoose.model<IUser>('User', UserSchema);

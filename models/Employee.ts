@@ -8,6 +8,9 @@ export interface IEmployee extends Document {
   role: string;
   department?: string;
   active: boolean;
+  labourType: 'OUR_LABOUR' | 'SUPPLY_LABOUR' | 'SUBCONTRACTOR';
+  projectId?: string; // Project this employee belongs to
+  uploadedBy?: mongoose.Types.ObjectId; // User who uploaded this employee
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -24,6 +27,14 @@ const EmployeeSchema = new Schema<IEmployee>({
   role: { type: String, required: true },
   department: { type: String },
   active: { type: Boolean, default: true },
+  labourType: { 
+    type: String, 
+    enum: ['OUR_LABOUR', 'SUPPLY_LABOUR', 'SUBCONTRACTOR'],
+    default: 'OUR_LABOUR',
+    required: true 
+  },
+  projectId: { type: String, index: true },
+  uploadedBy: { type: Schema.Types.ObjectId, ref: 'User' },
 }, {
   timestamps: true,
 });

@@ -31,6 +31,24 @@ export function withAuth(handler: (req: AuthenticatedRequest) => Promise<NextRes
   };
 }
 
+/**
+ * Middleware for Super Admin only
+ */
+export function withSuperAdmin(handler: (req: AuthenticatedRequest) => Promise<NextResponse>) {
+  return withAuth(async (req: AuthenticatedRequest) => {
+    if (req.user?.role !== 'super-admin') {
+      return NextResponse.json(
+        { error: 'Super Admin access required' },
+        { status: 403 }
+      );
+    }
+    return handler(req);
+  });
+}
+
+/**
+ * Middleware for Admin and Super Admin
+ */
 export function withAdmin(handler: (req: AuthenticatedRequest) => Promise<NextResponse>) {
   return withAuth(async (req: AuthenticatedRequest) => {
     if (req.user?.role !== 'admin' && req.user?.role !== 'super-admin') {
@@ -43,22 +61,34 @@ export function withAdmin(handler: (req: AuthenticatedRequest) => Promise<NextRe
   });
 }
 
-export function withSuperAdmin(handler: (req: AuthenticatedRequest) => Promise<NextResponse>) {
+/**
+ * Middleware for all authenticated users (view access)
+ */
+export function withViewAccess(handler: (req: AuthenticatedRequest) => Promise<NextResponse>) {
   return withAuth(async (req: AuthenticatedRequest) => {
-    if (req.user?.role !== 'super-admin') {
-      return NextResponse.json(
-        { error: 'Super admin access required' },
-        { status: 403 }
-      );
-    }
+    // Allow all authenticated users to view
     return handler(req);
   });
 }
 
-export function withViewAccess(handler: (req: AuthenticatedRequest) => Promise<NextResponse>) {
+/**
+ * Middleware for users with upload permission (User role can upload for their projects)
+ */
+export function withUploadPermission(handler: (req: AuthenticatedRequest) => Promise<NextResponse>) {
   return withAuth(async (req: AuthenticatedRequest) => {
-    // All authenticated users can view
-    return handler(req);
+    const role = req.user?.role;
+    // Super Admin and Admin can upload anywhere
+    if (role === 'super-admin' || role === 'admin') {
+      return handler(req);
+    }
+    // Users can upload for their allotted projects only
+    if (role === 'user') {
+      return handler(req);
+    }
+    return NextResponse.json(
+      { error: 'Upload permission required' },
+      { status: 403 }
+    );
   });
 }
 

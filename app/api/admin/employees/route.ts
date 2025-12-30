@@ -64,6 +64,24 @@ async function handleCreateEmployee(req: AuthenticatedRequest) {
       data: employee,
     });
   } catch (error: any) {
+    console.error('Create employee error:', error);
+    // Handle duplicate key error (MongoDB error code 11000)
+    if (error.code === 11000) {
+      const body = await req.json().catch(() => ({}));
+      const empId = body.empId || 'provided';
+      return NextResponse.json(
+        { error: `Employee ID "${empId}" already exists. Please use a unique Employee ID.` },
+        { status: 400 }
+      );
+    }
+    // Handle validation errors
+    if (error.name === 'ValidationError') {
+      const validationErrors = Object.values(error.errors || {}).map((err: any) => err.message).join(', ');
+      return NextResponse.json(
+        { error: `Validation error: ${validationErrors}` },
+        { status: 400 }
+      );
+    }
     return NextResponse.json(
       { error: error.message || 'Failed to create employee' },
       { status: 500 }

@@ -5,7 +5,9 @@ import { useRouter } from 'next/navigation';
 import { useAuth } from '../context/AuthContext';
 
 export default function LoginPage() {
+  const [loginType, setLoginType] = useState<'email' | 'username'>('email');
   const [email, setEmail] = useState('');
+  const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -22,7 +24,19 @@ export default function LoginPage() {
       if (isRegister) {
         await register(email, password);
       } else {
-        await login(email, password);
+        // Support both email and username login
+        const loginIdentifier = loginType === 'email' ? email.trim() : username.trim();
+        if (!loginIdentifier) {
+          setError('Please enter your email or username');
+          setLoading(false);
+          return;
+        }
+        if (!password) {
+          setError('Please enter your password');
+          setLoading(false);
+          return;
+        }
+        await login(loginIdentifier, password);
       }
       router.push('/dashboard');
     } catch (err: any) {
@@ -46,17 +60,67 @@ export default function LoginPage() {
         )}
 
         <form onSubmit={handleSubmit} className="space-y-4">
+          {!isRegister && (
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Login with
+              </label>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLoginType('email');
+                    setEmail('');
+                    setUsername('');
+                  }}
+                  className={`flex-1 px-4 py-2 rounded-md ${
+                    loginType === 'email'
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                  }`}
+                >
+                  Email
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLoginType('username');
+                    setEmail('');
+                    setUsername('');
+                  }}
+                  className={`flex-1 px-4 py-2 rounded-md ${
+                    loginType === 'username'
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                  }`}
+                >
+                  Username
+                </button>
+              </div>
+            </div>
+          )}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
-              Email
+              {isRegister ? 'Email' : loginType === 'email' ? 'Email' : 'Username'}
             </label>
-            <input
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              required
-              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
-            />
+            {isRegister || loginType === 'email' ? (
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                required
+                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            ) : (
+              <input
+                type="text"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                required
+                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="Enter your username"
+              />
+            )}
           </div>
 
           <div>
@@ -82,13 +146,22 @@ export default function LoginPage() {
         </form>
 
         <div className="mt-4 text-center">
-          <button
-            type="button"
-            onClick={() => setIsRegister(!isRegister)}
-            className="text-blue-600 hover:text-blue-800 text-sm"
-          >
-            {isRegister ? 'Already have an account? Login' : "Don't have an account? Register"}
-          </button>
+          {isRegister ? (
+            <button
+              type="button"
+              onClick={() => setIsRegister(false)}
+              className="text-blue-600 hover:text-blue-800 text-sm"
+            >
+              Already have an account? Login
+            </button>
+          ) : (
+            <div className="text-sm text-gray-600">
+              <p>Don&apos;t have an account?</p>
+              <p className="mt-1 text-xs text-gray-500">
+                Contact your administrator to create an account
+              </p>
+            </div>
+          )}
         </div>
       </div>
     </div>

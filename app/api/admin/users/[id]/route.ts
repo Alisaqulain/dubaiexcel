@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from 'next/server';
 import connectDB from '@/lib/mongodb';
 import { withAdmin, AuthenticatedRequest } from '@/lib/middleware';
 import User from '@/models/User';
-import bcrypt from 'bcryptjs';
 
 // GET /api/admin/users/:id - Get user by ID
 async function handleGetUser(
@@ -13,7 +12,7 @@ async function handleGetUser(
     await connectDB();
 
     const params = await Promise.resolve(context.params);
-    const user = await User.findById(params.id).select('-passwordHash').lean();
+    const user = await User.findById(params.id).lean();
 
     if (!user) {
       return NextResponse.json(
@@ -24,12 +23,18 @@ async function handleGetUser(
 
     return NextResponse.json({
       success: true,
-      data: user,
+      data: {
+        id: user._id,
+        email: (user as any).email,
+        username: (user as any).username,
+        name: (user as any).name,
+        role: (user as any).role,
+        active: (user as any).active,
+      },
     });
   } catch (error: any) {
-    console.error('Get user error:', error);
     return NextResponse.json(
-      { error: error.message || 'Failed to fetch user' },
+      { error: error.message || 'Failed to get user' },
       { status: 500 }
     );
   }
@@ -45,7 +50,7 @@ async function handleUpdateUser(
 
     const params = await Promise.resolve(context.params);
     const body = await req.json();
-    const { fullName, email, role, isActive, canUpload } = body;
+    const { name, username, email, role, active } = body;
 
     const user = await User.findById(params.id);
     if (!user) {
@@ -55,50 +60,69 @@ async function handleUpdateUser(
       );
     }
 
-    // Only super-admin can assign super-admin role
-    if (role === 'super-admin' && req.user?.role !== 'super-admin') {
+    // Prevent deactivating yourself
+    if (active === false && params.id === req.user?.userId) {
       return NextResponse.json(
-        { error: 'Only super-admin can assign super-admin role' },
-        { status: 403 }
-      );
-    }
-
-    // Prevent non-super-admin from changing existing super-admin role
-    if (user.role === 'super-admin' && role !== 'super-admin' && req.user?.role !== 'super-admin') {
-      return NextResponse.json(
-        { error: 'Only super-admin can modify super-admin users' },
-        { status: 403 }
+        { error: 'Cannot deactivate your own account' },
+        { status: 400 }
       );
     }
 
     // Update fields
-    if (fullName !== undefined) user.fullName = fullName;
-    if (email !== undefined) {
-      // Check if email is already taken by another user
-      const existingUser = await User.findOne({ email: email.toLowerCase(), _id: { $ne: params.id } });
+    if (name !== undefined) user.name = name;
+    if (username !== undefined) {
+      // Check if username is already taken by another user
+      const existingUser = await User.findOne({ 
+        username: username.toLowerCase(),
+        _id: { $ne: user._id }
+      });
       if (existingUser) {
         return NextResponse.json(
-          { error: 'Email already in use' },
+          { error: 'Username already taken' },
+          { status: 400 }
+        );
+      }
+      user.username = username ? username.toLowerCase() : undefined;
+    }
+    if (email !== undefined) {
+      // Check if email is already taken by another user
+      const existingUser = await User.findOne({ 
+        email: email.toLowerCase(),
+        _id: { $ne: user._id }
+      });
+      if (existingUser) {
+        return NextResponse.json(
+          { error: 'Email already taken' },
           { status: 400 }
         );
       }
       user.email = email.toLowerCase();
     }
     if (role !== undefined) user.role = role;
-    if (isActive !== undefined) user.isActive = isActive;
-    if (canUpload !== undefined) user.canUpload = canUpload;
+    if (active !== undefined) user.active = active;
 
     await user.save();
 
-    const userResponse = user.toObject();
-    delete (userResponse as any).passwordHash;
-
     return NextResponse.json({
       success: true,
-      data: userResponse,
+      message: 'User updated successfully',
+      data: {
+        id: user._id,
+        email: user.email,
+        username: user.username,
+        name: user.name,
+        role: user.role,
+        active: user.active,
+      },
     });
   } catch (error: any) {
     console.error('Update user error:', error);
+    if (error.code === 11000) {
+      return NextResponse.json(
+        { error: 'Username or email already exists' },
+        { status: 400 }
+      );
+    }
     return NextResponse.json(
       { error: error.message || 'Failed to update user' },
       { status: 500 }
@@ -115,6 +139,7 @@ async function handleDeleteUser(
     await connectDB();
 
     const params = await Promise.resolve(context.params);
+    
     // Prevent deleting yourself
     if (params.id === req.user?.userId) {
       return NextResponse.json(
@@ -124,6 +149,7 @@ async function handleDeleteUser(
     }
 
     const user = await User.findByIdAndDelete(params.id);
+
     if (!user) {
       return NextResponse.json(
         { error: 'User not found' },
@@ -136,7 +162,6 @@ async function handleDeleteUser(
       message: 'User deleted successfully',
     });
   } catch (error: any) {
-    console.error('Delete user error:', error);
     return NextResponse.json(
       { error: error.message || 'Failed to delete user' },
       { status: 500 }
@@ -144,7 +169,6 @@ async function handleDeleteUser(
   }
 }
 
-// Wrappers to handle Next.js dynamic route context
 export async function GET(
   req: NextRequest,
   context: { params: Promise<{ id: string }> | { id: string } }
@@ -174,4 +198,3 @@ export async function DELETE(
   });
   return handler(req);
 }
-

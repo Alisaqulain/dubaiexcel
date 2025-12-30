@@ -4,17 +4,19 @@ import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '../context/AuthContext';
 
-export function ProtectedRoute({ 
-  children, 
-  requireAdmin = false,
-  requireSuperAdmin = false,
-  allowViewOnly = false 
-}: { 
-  children: React.ReactNode; 
+interface ProtectedRouteProps {
+  children: React.ReactNode;
   requireAdmin?: boolean;
   requireSuperAdmin?: boolean;
   allowViewOnly?: boolean;
-}) {
+}
+
+export function ProtectedRoute({ 
+  children, 
+  requireAdmin = false, 
+  requireSuperAdmin = false,
+  allowViewOnly = false 
+}: ProtectedRouteProps) {
   const { user, loading } = useAuth();
   const router = useRouter();
 
@@ -47,10 +49,7 @@ export function ProtectedRoute({
   }
 
   if (requireAdmin && user.role !== 'admin' && user.role !== 'super-admin') {
-    if (!allowViewOnly) {
-      return null;
-    }
-    // For view-only access, e1-user can view but not edit
+    return null;
   }
 
   return <>{children}</>;

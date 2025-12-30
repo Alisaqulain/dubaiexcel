@@ -20,7 +20,14 @@ export function verifyToken(token: string): JWTPayload {
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
     return decoded as JWTPayload;
-  } catch (error) {
+  } catch (error: any) {
+    if (error.name === 'TokenExpiredError') {
+      throw new Error('Token has expired. Please login again.');
+    } else if (error.name === 'JsonWebTokenError') {
+      throw new Error('Invalid token. Please login again.');
+    } else if (error.name === 'NotBeforeError') {
+      throw new Error('Token not active yet.');
+    }
     throw new Error('Invalid or expired token');
   }
 }
