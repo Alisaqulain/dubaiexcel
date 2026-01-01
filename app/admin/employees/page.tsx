@@ -43,7 +43,9 @@ function EmployeesComponent() {
     siteType: string;
     role: string;
     department: string;
+    password: string;
     active: boolean;
+    labourType?: string;
   }>>([]);
   const [statusFilter, setStatusFilter] = useState<'all' | 'active' | 'inactive'>('all');
   const [uploading, setUploading] = useState(false);
@@ -77,7 +79,9 @@ function EmployeesComponent() {
         siteType: 'OTHER',
         role: '',
         department: '',
+        password: '',
         active: true,
+        labourType: 'OUR_LABOUR',
       }));
       setMultipleRows(newRows);
     }
@@ -122,7 +126,7 @@ function EmployeesComponent() {
     
     // Validate required fields before submitting
     const invalidRows = multipleRows.filter((row, index) => {
-      if (!row.empId || !row.name || !row.site || !row.role) {
+      if (!row.empId || !row.name || !row.site || !row.role || !row.password) {
         return true;
       }
       // Validate siteType
@@ -134,7 +138,7 @@ function EmployeesComponent() {
     });
 
     if (invalidRows.length > 0) {
-      alert('Please fill in all required fields (Employee ID, Name, Site, Role) for all rows.');
+      alert('Please fill in all required fields (Employee ID, Name, Site, Role, Password) for all rows.');
       return;
     }
 
@@ -217,7 +221,9 @@ function EmployeesComponent() {
             siteType: String(row['Site Type'] || row['siteType'] || row['SiteType'] || 'OTHER'),
             role: String(row['Role'] || row['role'] || ''),
             department: String(row['Department'] || row['department'] || ''),
-            active: row['Active'] !== undefined ? Boolean(row['Active']) : (row['active'] !== undefined ? Boolean(row['active']) : true),
+            password: String(row['Password'] || row['password'] || ''),
+            active: row['Active'] !== undefined ? Boolean(row['Active']) : (row['active'] !== undefined ? Boolean(row['active']) : (String(row['Active'] || row['active'] || 'Yes').toLowerCase() === 'yes')),
+            labourType: String(row['Labour Type'] || row['labourType'] || row['LabourType'] || 'OUR_LABOUR'),
           }));
 
           const response = await fetch('/api/admin/employees/bulk', {
@@ -347,6 +353,13 @@ function EmployeesComponent() {
           <h1 className="text-3xl font-bold">Employees {!canEdit && '(View Only)'}</h1>
           {canEdit && (
             <div className="flex gap-2">
+              <a
+                href="/api/admin/employees/template"
+                download
+                className="bg-purple-600 text-white px-4 py-2 rounded-md hover:bg-purple-700"
+              >
+                Download Template
+              </a>
               <button
                 onClick={() => {
                   setShowBulkUpload(!showBulkUpload);
@@ -375,8 +388,17 @@ function EmployeesComponent() {
         {showBulkUpload && (
           <div className="bg-white rounded-lg shadow p-6 mb-6">
             <h2 className="text-xl font-semibold mb-4">Bulk Upload Employees</h2>
+            <div className="mb-4 flex gap-2">
+              <a
+                href="/api/admin/employees/template"
+                download
+                className="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700 text-sm"
+              >
+                Download Template
+              </a>
+            </div>
             <p className="text-sm text-gray-600 mb-4">
-              Upload an Excel file (.xlsx, .xls) or CSV file with columns: Employee ID, Name, Site, Site Type, Role, Department, Active
+              Upload an Excel file (.xlsx, .xls) or CSV file with columns: Employee ID, Name, Site, Site Type, Role, Department, Password, Active, Labour Type
             </p>
             <input
               ref={fileInputRef}
@@ -420,7 +442,9 @@ function EmployeesComponent() {
                     siteType: 'OTHER',
                     role: '',
                     department: '',
+                    password: '',
                     active: true,
+                    labourType: 'OUR_LABOUR',
                   }));
                   setMultipleRows(newRows);
                 }}
@@ -440,6 +464,7 @@ function EmployeesComponent() {
                       <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Site Type</th>
                       <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Role</th>
                       <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Department</th>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Password</th>
                       <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Active</th>
                     </tr>
                   </thead>
@@ -507,6 +532,16 @@ function EmployeesComponent() {
                             onChange={(e) => updateRowData(index, 'department', e.target.value)}
                             className="w-full px-2 py-1 border rounded text-sm"
                             placeholder="Department"
+                          />
+                        </td>
+                        <td className="px-3 py-2">
+                          <input
+                            type="password"
+                            value={row.password}
+                            onChange={(e) => updateRowData(index, 'password', e.target.value)}
+                            required
+                            className="w-full px-2 py-1 border rounded text-sm"
+                            placeholder="Password"
                           />
                         </td>
                         <td className="px-3 py-2">

@@ -32,3 +32,5 @@ async function handleGetEmployeeCounts(req: NextRequest) {
 
 export const GET = withViewAccess(handleGetEmployeeCounts);
 
+
+

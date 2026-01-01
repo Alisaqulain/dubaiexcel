@@ -62,3 +62,5 @@ async function handleChangePassword(req: AuthenticatedRequest) {
 
 export const POST = withAuth(handleChangePassword);
 
+
+

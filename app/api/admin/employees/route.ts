@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import connectDB from '@/lib/mongodb';
 import { withAdmin, withViewAccess, AuthenticatedRequest } from '@/lib/middleware';
 import Employee from '@/models/Employee';
+import bcrypt from 'bcryptjs';
 
 async function handleGetEmployees(req: NextRequest) {
   try {
@@ -40,7 +41,7 @@ async function handleCreateEmployee(req: AuthenticatedRequest) {
     await connectDB();
 
     const body = await req.json();
-    const { empId, name, site, siteType, role, department, active } = body;
+    const { empId, name, site, siteType, role, department, active, password, labourType } = body;
 
     if (!empId || !name || !site || !role) {
       return NextResponse.json(
@@ -49,7 +50,8 @@ async function handleCreateEmployee(req: AuthenticatedRequest) {
       );
     }
 
-    const employee = await Employee.create({
+    // Prepare employee data
+    const employeeData: any = {
       empId,
       name,
       site,
@@ -57,11 +59,24 @@ async function handleCreateEmployee(req: AuthenticatedRequest) {
       role,
       department,
       active: active !== undefined ? active : true,
-    });
+      labourType: labourType || 'OUR_LABOUR',
+    };
+
+    // Hash password if provided
+    if (password) {
+      const salt = await bcrypt.genSalt(10);
+      employeeData.password = await bcrypt.hash(password, salt);
+    }
+
+    const employee = await Employee.create(employeeData);
+
+    // Remove password from response - convert to plain object
+    const employeeResponse: any = JSON.parse(JSON.stringify(employee));
+    delete employeeResponse.password;
 
     return NextResponse.json({
       success: true,
-      data: employee,
+      data: employeeResponse,
     });
   } catch (error: any) {
     console.error('Create employee error:', error);

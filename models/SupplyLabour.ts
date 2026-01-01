@@ -39,3 +39,5 @@ SupplyLabourSchema.index({ empId: 1, companyName: 1 }, { unique: true });
 const SupplyLabour = mongoose.models.SupplyLabour || mongoose.model<ISupplyLabour>('SupplyLabour', SupplyLabourSchema);
 export default SupplyLabour;
 
+
+

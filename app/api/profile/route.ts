@@ -113,3 +113,5 @@ async function handleUpdateProfile(req: AuthenticatedRequest) {
 export const GET = withAuth(handleGetProfile);
 export const PUT = withAuth(handleUpdateProfile);
 
+
+

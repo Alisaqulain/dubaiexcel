@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import connectDB from '@/lib/mongodb';
 import { withAdmin, AuthenticatedRequest } from '@/lib/middleware';
 import Employee from '@/models/Employee';
+import bcrypt from 'bcryptjs';
 
 async function handleBulkCreateEmployees(req: AuthenticatedRequest) {
   try {
@@ -24,7 +25,7 @@ async function handleBulkCreateEmployees(req: AuthenticatedRequest) {
     };
 
     for (const emp of employees) {
-      const { empId, name, site, siteType, role, department, active } = emp;
+      const { empId, name, site, siteType, role, department, active, password, labourType } = emp;
 
       if (!empId || !name || !site || !role) {
         results.failed++;
@@ -33,7 +34,8 @@ async function handleBulkCreateEmployees(req: AuthenticatedRequest) {
       }
 
       try {
-        await Employee.create({
+        // Prepare employee data
+        const employeeData: any = {
           empId,
           name,
           site,
@@ -41,7 +43,16 @@ async function handleBulkCreateEmployees(req: AuthenticatedRequest) {
           role,
           department,
           active: active !== undefined ? active : true,
-        });
+          labourType: labourType || 'OUR_LABOUR',
+        };
+
+        // Hash password if provided
+        if (password) {
+          const salt = await bcrypt.genSalt(10);
+          employeeData.password = await bcrypt.hash(password, salt);
+        }
+
+        await Employee.create(employeeData);
         results.created++;
       } catch (error: any) {
         results.failed++;
@@ -67,6 +78,8 @@ async function handleBulkCreateEmployees(req: AuthenticatedRequest) {
 }
 
 export const POST = withAdmin(handleBulkCreateEmployees);
+
+
 
 
 
