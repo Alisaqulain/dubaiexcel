@@ -33,5 +33,3 @@ SubcontractorSchema.index({ companyName: 1, projectId: 1 }, { unique: true });
 const Subcontractor = mongoose.models.Subcontractor || mongoose.model<ISubcontractor>('Subcontractor', SubcontractorSchema);
 export default Subcontractor;
 
-
-

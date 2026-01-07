@@ -17,7 +17,27 @@ export default function ExcelUploadNew({ onUploadSuccess }: ExcelUploadNewProps)
 
   const handleDownloadTemplate = async () => {
     try {
-      const response = await fetch(`/api/admin/excel/template?type=${labourType}`, {
+      // Get assigned format first
+      const formatResponse = await fetch('/api/employee/excel-format', {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+        },
+      });
+
+      const formatResult = await formatResponse.json();
+      
+      if (!formatResult.success || !formatResult.data) {
+        setMessage({ 
+          type: 'error', 
+          text: 'No format assigned to you. Please contact administrator to assign a format before downloading templates.' 
+        });
+        return;
+      }
+
+      const formatId = formatResult.data._id;
+      
+      // Download the assigned format template
+      const response = await fetch(`/api/employee/excel-formats/${formatId}/download`, {
         headers: {
           'Authorization': `Bearer ${token}`,
         },
@@ -31,11 +51,16 @@ export default function ExcelUploadNew({ onUploadSuccess }: ExcelUploadNewProps)
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `employee_template_${labourType.toLowerCase()}.xlsx`;
+      a.download = `${formatResult.data.name.replace(/[^a-z0-9]/gi, '_')}_template.xlsx`;
       document.body.appendChild(a);
       a.click();
       window.URL.revokeObjectURL(url);
       document.body.removeChild(a);
+      
+      setMessage({ 
+        type: 'success', 
+        text: `Template downloaded: ${formatResult.data.name}` 
+      });
     } catch (err: any) {
       setMessage({ type: 'error', text: err.message || 'Failed to download template' });
     }
@@ -52,6 +77,67 @@ export default function ExcelUploadNew({ onUploadSuccess }: ExcelUploadNewProps)
     setMessage(null);
 
     try {
+      // STRICT: Validate format before upload
+      const validateFormData = new FormData();
+      validateFormData.append('file', file);
+
+      const validateResponse = await fetch('/api/employee/validate-excel-format', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+        },
+        body: validateFormData,
+      });
+
+      const validateResult = await validateResponse.json();
+
+      if (!validateResult.hasFormat) {
+        setMessage({ 
+          type: 'error', 
+          text: validateResult.error || 'No format assigned to you. Please contact administrator to assign a format before uploading files.' 
+        });
+        setUploading(false);
+        return;
+      }
+
+      if (!validateResult.success || !validateResult.validation.isValid) {
+        // Format validation failed
+        const errors = validateResult.validation.errors || [];
+        const warnings = validateResult.validation.warnings || [];
+        const missingCols = validateResult.validation.missingColumns || [];
+        const formatCols = validateResult.example?.columns || [];
+
+        let errorMsg = '⚠️ Format Validation Failed!\n\n';
+        errorMsg += 'Your Excel file does not match the assigned format.\n\n';
+        
+        if (missingCols.length > 0) {
+          errorMsg += `❌ Missing Required Columns:\n${missingCols.map((col: string) => `  - ${col}`).join('\n')}\n\n`;
+        }
+        
+        if (errors.length > 0) {
+          errorMsg += `❌ Errors:\n${errors.slice(0, 5).map((err: string) => `  - ${err}`).join('\n')}\n`;
+          if (errors.length > 5) {
+            errorMsg += `  ... and ${errors.length - 5} more errors\n`;
+          }
+          errorMsg += '\n';
+        }
+
+        if (warnings.length > 0) {
+          errorMsg += `⚠️ Warnings:\n${warnings.slice(0, 3).map((warn: string) => `  - ${warn}`).join('\n')}\n\n`;
+        }
+
+        errorMsg += `✅ Required Format Columns:\n${formatCols.map((col: string, idx: number) => `  ${idx + 1}. ${col}`).join('\n')}\n\n`;
+        errorMsg += 'Please download the template and fix your file, then try uploading again.';
+
+        setMessage({ 
+          type: 'error', 
+          text: errorMsg 
+        });
+        setUploading(false);
+        return;
+      }
+
+      // Format is valid, proceed with upload
       const formData = new FormData();
       formData.append('file', file);
       formData.append('labourType', labourType);
@@ -71,7 +157,7 @@ export default function ExcelUploadNew({ onUploadSuccess }: ExcelUploadNewProps)
       if (result.success) {
         setMessage({ 
           type: 'success', 
-          text: `Successfully uploaded! Created: ${result.data.created}, Failed: ${result.data.failed}` 
+          text: `✅ Format validated and successfully uploaded! Created: ${result.data.created}, Failed: ${result.data.failed}` 
         });
         setFile(null);
         if (onUploadSuccess) onUploadSuccess();
@@ -87,7 +173,7 @@ export default function ExcelUploadNew({ onUploadSuccess }: ExcelUploadNewProps)
 
   return (
     <div className="bg-white rounded-lg shadow p-6">
-      <h2 className="text-2xl font-bold mb-4">Upload Employee Data (Excel)</h2>
+      <h2 className="text-2xl font-bold mb-4">Create & Upload Excel File</h2>
 
       {message && (
         <div className={`mb-4 p-3 rounded ${
@@ -147,22 +233,24 @@ export default function ExcelUploadNew({ onUploadSuccess }: ExcelUploadNewProps)
           <button
             type="button"
             onClick={handleDownloadTemplate}
-            className="px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700"
+            className="px-4 py-2 bg-purple-600 text-white rounded-md hover:bg-purple-700 font-semibold"
+            title="Download your assigned format template"
           >
-            Download Template
+            📥 Download Assigned Template
           </button>
           <button
             type="submit"
-            disabled={uploading}
+            disabled={uploading || !file}
             className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50"
           >
-            {uploading ? 'Uploading...' : 'Upload Excel'}
+            {uploading ? 'Validating & Uploading...' : 'Upload Excel'}
           </button>
         </div>
+        <p className="text-xs text-gray-500 mt-2">
+          ⚠️ Your file will be validated against your assigned format before upload. Files that don&apos;t match will be rejected.
+        </p>
       </form>
     </div>
   );
 }
-
-
 

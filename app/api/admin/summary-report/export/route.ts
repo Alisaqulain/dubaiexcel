@@ -521,4 +521,3 @@ async function handleExportReport(req: AuthenticatedRequest) {
 }
 
 export const GET = withSuperAdmin(handleExportReport);
-

@@ -44,17 +44,26 @@ const EmployeeSchema = new Schema<IEmployee>({
 });
 
 // Hash password before saving
-EmployeeSchema.pre('save', async function(next: any) {
-  if (!this.isModified('password') || !this.password) {
-    if (next) next();
-    return;
-  }
+EmployeeSchema.pre('save', async function() {
   try {
+    // If password is not modified or doesn't exist, skip hashing
+    if (!this.isModified('password') || !this.password) {
+      return;
+    }
+
+    // Only hash if password is a plain string (not already hashed)
+    // Check if password is already hashed (bcrypt hashes start with $2a$, $2b$, or $2y$)
+    if (typeof this.password === 'string' && this.password.startsWith('$2')) {
+      // Password is already hashed, skip
+      return;
+    }
+
+    // Hash the password
     const salt = await bcrypt.genSalt(10);
-    this.password = await bcrypt.hash(this.password, salt);
-    if (next) next();
-  } catch (error: any) {
-    if (next) next(error);
+    this.password = await bcrypt.hash(String(this.password), salt);
+  } catch (error) {
+    // If there's an error, throw it so Mongoose can handle it
+    throw error;
   }
 });
 

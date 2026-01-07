@@ -291,4 +291,3 @@ async function handleGetSummaryReport(req: AuthenticatedRequest) {
 }
 
 export const GET = withSuperAdmin(handleGetSummaryReport);
-

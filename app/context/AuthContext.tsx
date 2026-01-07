@@ -14,7 +14,7 @@ interface User {
 interface AuthContextType {
   user: User | null;
   token: string | null;
-  login: (loginIdentifier: string, password: string) => Promise<void>;
+  login: (loginIdentifier: string, password: string, loginType?: 'email' | 'username' | 'employee') => Promise<void>;
   register: (email: string, password: string, role?: string, name?: string) => Promise<void>;
   logout: () => void;
   loading: boolean;
@@ -70,11 +70,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     validateAndSetToken();
   }, []);
 
-  const login = async (loginIdentifier: string, password: string) => {
+  const login = async (loginIdentifier: string, password: string, loginType?: 'email' | 'username' | 'employee') => {
     const response = await fetch('/api/auth/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ loginIdentifier, password }),
+      body: JSON.stringify({ 
+        loginIdentifier, 
+        password,
+        loginType: loginType || (loginIdentifier.includes('@') ? 'email' : 'username')
+      }),
     });
 
     const data = await response.json();

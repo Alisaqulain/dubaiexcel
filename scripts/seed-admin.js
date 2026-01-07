@@ -73,20 +73,57 @@ async function seedAdmin() {
     } else {
       const hashedAdminPassword = await bcrypt.hash(adminPassword, 10);
       await User.create({
-        email: adminEmail,
+      email: adminEmail,
         password: hashedAdminPassword,
-        role: 'admin',
+      role: 'admin',
         name: adminName,
         username: adminUsername,
         active: true,
-      });
-      console.log('\n✅ Admin user created successfully!');
-      console.log('\n📋 Admin Credentials:');
-      console.log('   Email:', adminEmail);
+    });
+    console.log('\n✅ Admin user created successfully!');
+    console.log('\n📋 Admin Credentials:');
+    console.log('   Email:', adminEmail);
       console.log('   Username:', adminUsername);
-      console.log('   Password:', adminPassword);
-      console.log('   Full Name:', adminName);
-      console.log('   Role: admin');
+    console.log('   Password:', adminPassword);
+    console.log('   Full Name:', adminName);
+    console.log('   Role: admin');
+    }
+
+    console.log('\n⚠️  IMPORTANT: Please change the password after first login!');
+    console.log('\n🔗 Login at: http://localhost:3000/login');
+
+    await mongoose.disconnect();
+    process.exit(0);
+  } catch (error) {
+    console.error('Error seeding admin:', error);
+    process.exit(1);
+  }
+}
+
+seedAdmin();
+
+
+    let existingAdmin = await User.findOne({ email: adminEmail });
+    if (existingAdmin) {
+      console.log(`\n⚠️  Admin user already exists: ${adminEmail}`);
+      console.log(`   Current role: ${existingAdmin.role}`);
+    } else {
+      const hashedAdminPassword = await bcrypt.hash(adminPassword, 10);
+      await User.create({
+      email: adminEmail,
+        password: hashedAdminPassword,
+      role: 'admin',
+        name: adminName,
+        username: adminUsername,
+        active: true,
+    });
+    console.log('\n✅ Admin user created successfully!');
+    console.log('\n📋 Admin Credentials:');
+    console.log('   Email:', adminEmail);
+      console.log('   Username:', adminUsername);
+    console.log('   Password:', adminPassword);
+    console.log('   Full Name:', adminName);
+    console.log('   Role: admin');
     }
 
     console.log('\n⚠️  IMPORTANT: Please change the password after first login!');

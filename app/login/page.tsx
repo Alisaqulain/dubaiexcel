@@ -5,9 +5,10 @@ import { useRouter } from 'next/navigation';
 import { useAuth } from '../context/AuthContext';
 
 export default function LoginPage() {
-  const [loginType, setLoginType] = useState<'email' | 'username'>('email');
+  const [loginType, setLoginType] = useState<'email' | 'username' | 'employee'>('email');
   const [email, setEmail] = useState('');
   const [username, setUsername] = useState('');
+  const [employeeId, setEmployeeId] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -24,10 +25,18 @@ export default function LoginPage() {
       if (isRegister) {
         await register(email, password);
       } else {
-        // Support both email and username login
-        const loginIdentifier = loginType === 'email' ? email.trim() : username.trim();
+        // Support email, username, and employee ID login
+        let loginIdentifier = '';
+        if (loginType === 'email') {
+          loginIdentifier = email.trim();
+        } else if (loginType === 'username') {
+          loginIdentifier = username.trim();
+        } else if (loginType === 'employee') {
+          loginIdentifier = employeeId.trim().toUpperCase();
+        }
+        
         if (!loginIdentifier) {
-          setError('Please enter your email or username');
+          setError(`Please enter your ${loginType === 'employee' ? 'Employee ID' : loginType}`);
           setLoading(false);
           return;
         }
@@ -36,7 +45,9 @@ export default function LoginPage() {
           setLoading(false);
           return;
         }
-        await login(loginIdentifier, password);
+        
+        // Pass loginType to the login function
+        await login(loginIdentifier, password, loginType);
       }
       router.push('/dashboard');
     } catch (err: any) {
@@ -72,8 +83,9 @@ export default function LoginPage() {
                     setLoginType('email');
                     setEmail('');
                     setUsername('');
+                    setEmployeeId('');
                   }}
-                  className={`flex-1 px-4 py-2 rounded-md ${
+                  className={`flex-1 px-4 py-2 rounded-md text-sm ${
                     loginType === 'email'
                       ? 'bg-blue-600 text-white'
                       : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
@@ -87,8 +99,9 @@ export default function LoginPage() {
                     setLoginType('username');
                     setEmail('');
                     setUsername('');
+                    setEmployeeId('');
                   }}
-                  className={`flex-1 px-4 py-2 rounded-md ${
+                  className={`flex-1 px-4 py-2 rounded-md text-sm ${
                     loginType === 'username'
                       ? 'bg-blue-600 text-white'
                       : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
@@ -96,12 +109,34 @@ export default function LoginPage() {
                 >
                   Username
                 </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLoginType('employee');
+                    setEmail('');
+                    setUsername('');
+                    setEmployeeId('');
+                  }}
+                  className={`flex-1 px-4 py-2 rounded-md text-sm ${
+                    loginType === 'employee'
+                      ? 'bg-blue-600 text-white'
+                      : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
+                  }`}
+                >
+                  Employee ID
+                </button>
               </div>
             </div>
           )}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
-              {isRegister ? 'Email' : loginType === 'email' ? 'Email' : 'Username'}
+              {isRegister 
+                ? 'Email' 
+                : loginType === 'email' 
+                  ? 'Email' 
+                  : loginType === 'username' 
+                    ? 'Username' 
+                    : 'Employee ID'}
             </label>
             {isRegister || loginType === 'email' ? (
               <input
@@ -110,8 +145,9 @@ export default function LoginPage() {
                 onChange={(e) => setEmail(e.target.value)}
                 required
                 className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="Enter your email"
               />
-            ) : (
+            ) : loginType === 'username' ? (
               <input
                 type="text"
                 value={username}
@@ -119,6 +155,15 @@ export default function LoginPage() {
                 required
                 className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                 placeholder="Enter your username"
+              />
+            ) : (
+              <input
+                type="text"
+                value={employeeId}
+                onChange={(e) => setEmployeeId(e.target.value.toUpperCase())}
+                required
+                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="Enter your Employee ID (e.g., EMP008)"
               />
             )}
           </div>

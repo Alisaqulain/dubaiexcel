@@ -43,7 +43,7 @@ async function handleUpdateEmployee(
 
     const params = await Promise.resolve(context.params);
     const body = await req.json();
-    const { empId, name, site, siteType, role, department, active } = body;
+    const { empId, name, site, siteType, role, department, active, password } = body;
 
     const employee = await Employee.findById(params.id);
     if (!employee) {
@@ -61,6 +61,11 @@ async function handleUpdateEmployee(
     if (role !== undefined) employee.role = role;
     if (department !== undefined) employee.department = department;
     if (active !== undefined) employee.active = active;
+    
+    // Update password if provided (will be hashed by pre-save hook)
+    if (password !== undefined && password.trim().length > 0) {
+      employee.password = password.trim();
+    }
 
     await employee.save();
 
@@ -143,6 +148,3 @@ export async function DELETE(
   });
   return handler(req);
 }
-
-
-

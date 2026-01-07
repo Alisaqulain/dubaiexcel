@@ -213,6 +213,3 @@ function ExcelMergeComponent() {
     </div>
   );
 }
-
-
-

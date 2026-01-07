@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import connectDB from '@/lib/mongodb';
-import { withAdmin } from '@/lib/middleware';
+import { withViewAccess } from '@/lib/middleware';
 import AttendanceMaster from '@/models/AttendanceMaster';
 import Employee from '@/models/Employee';
 import Upload from '@/models/Upload';
@@ -201,5 +201,5 @@ async function handleGetDashboard(req: NextRequest) {
   }
 }
 
-export const GET = withAdmin(handleGetDashboard);
+export const GET = withViewAccess(handleGetDashboard);
 

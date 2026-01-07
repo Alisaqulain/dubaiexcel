@@ -69,6 +69,14 @@ export default function Navigation() {
                   </Link>
                 )}
                 <Link
+                  href="/admin/created-excel-files"
+                  className={`flex items-center px-3 py-2 rounded-md text-sm font-medium ${
+                    isActive('/admin/created-excel-files') ? 'bg-blue-800' : 'hover:bg-blue-700'
+                  }`}
+                >
+                  Created Excel Files
+                </Link>
+                <Link
                   href="/admin/upload"
                   className={`flex items-center px-3 py-2 rounded-md text-sm font-medium ${
                     isActive('/admin/upload') ? 'bg-blue-800' : 'hover:bg-blue-700'
@@ -93,6 +101,14 @@ export default function Navigation() {
                       </span>
                     </span>
                   )}
+                </Link>
+                <Link
+                  href="/admin/excel-formats"
+                  className={`flex items-center px-3 py-2 rounded-md text-sm font-medium ${
+                    isActive('/admin/excel-formats') ? 'bg-blue-800' : 'hover:bg-blue-700'
+                  }`}
+                >
+                  Excel Formats
                 </Link>
                 <Link
                   href="/admin/excel-merge"
@@ -153,14 +169,6 @@ export default function Navigation() {
             )}
           </div>
           <div className="flex items-center">
-            <Link
-              href="/profile"
-              className={`flex items-center px-3 py-2 rounded-md text-sm font-medium mr-2 ${
-                isActive('/profile') ? 'bg-blue-800' : 'hover:bg-blue-700'
-              }`}
-            >
-              Profile
-            </Link>
             <div className="flex items-center mr-4">
               <span className="text-sm mr-2">{user.email}</span>
               <span className={`px-2 py-1 text-xs rounded-full font-semibold ${
@@ -185,4 +193,3 @@ export default function Navigation() {
     </nav>
   );
 }
-

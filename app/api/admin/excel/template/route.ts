@@ -92,6 +92,3 @@ async function handleGetTemplate(req: AuthenticatedRequest) {
 }
 
 export const GET = withAuth(handleGetTemplate);
-
-
-

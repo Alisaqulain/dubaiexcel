@@ -72,7 +72,7 @@ export function withViewAccess(handler: (req: AuthenticatedRequest) => Promise<N
 }
 
 /**
- * Middleware for users with upload permission (User role can upload for their projects)
+ * Middleware for users with upload permission (User role can upload for their projects, Employees can upload)
  */
 export function withUploadPermission(handler: (req: AuthenticatedRequest) => Promise<NextResponse>) {
   return withAuth(async (req: AuthenticatedRequest) => {
@@ -83,6 +83,10 @@ export function withUploadPermission(handler: (req: AuthenticatedRequest) => Pro
     }
     // Users can upload for their allotted projects only
     if (role === 'user') {
+      return handler(req);
+    }
+    // Employees can upload
+    if (role === 'employee') {
       return handler(req);
     }
     return NextResponse.json(

@@ -51,6 +51,7 @@ async function handleCreateEmployee(req: AuthenticatedRequest) {
     }
 
     // Prepare employee data
+    // Note: Password will be hashed by the pre-save hook in the Employee model
     const employeeData: any = {
       empId,
       name,
@@ -62,10 +63,9 @@ async function handleCreateEmployee(req: AuthenticatedRequest) {
       labourType: labourType || 'OUR_LABOUR',
     };
 
-    // Hash password if provided
-    if (password) {
-      const salt = await bcrypt.genSalt(10);
-      employeeData.password = await bcrypt.hash(password, salt);
+    // Only set password if it's provided and not empty
+    if (password && password.trim().length > 0) {
+      employeeData.password = password.trim();
     }
 
     const employee = await Employee.create(employeeData);
