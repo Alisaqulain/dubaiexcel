@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import { AuthProvider } from "./context/AuthContext";
+import Footer from "./components/Footer";
 
 export const metadata: Metadata = {
   title: "Manpower Attendance System",
@@ -14,8 +15,13 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className="h-full">
-      <body className="h-full">
-        <AuthProvider>{children}</AuthProvider>
+      <body className="h-full flex flex-col">
+        <AuthProvider>
+          <div className="flex-1">
+            {children}
+          </div>
+          <Footer />
+        </AuthProvider>
       </body>
     </html>
   );
