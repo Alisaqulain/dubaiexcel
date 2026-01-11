@@ -1,26 +1,24 @@
 import connectDB from './mongodb';
+import User from '@/models/User'; // Import User first to ensure it's registered
 import ActivityLog from '@/models/ActivityLog';
 
-/**
- * Activity Logger Utility
- * Logs all user activities for audit trail
- */
 export interface LogActivityParams {
   userId: string;
   userEmail: string;
-  action: 'UPLOAD' | 'EDIT' | 'DELETE' | 'CREATE' | 'MERGE' | 'TOGGLE_STATUS';
-  entityType: 'EMPLOYEE' | 'SUPPLY_LABOUR' | 'SUBCONTRACTOR' | 'USER' | 'EXCEL';
+  action: string;
+  entityType: string;
   entityId?: string;
   description: string;
   projectId?: string;
-  metadata?: Record<string, any>;
+  metadata?: any;
 }
 
 export async function logActivity(params: LogActivityParams): Promise<void> {
   try {
     await connectDB();
+    
     await ActivityLog.create({
-      userId: params.userId,
+      userId: params.userId || undefined,
       userEmail: params.userEmail,
       action: params.action,
       entityType: params.entityType,
@@ -29,16 +27,8 @@ export async function logActivity(params: LogActivityParams): Promise<void> {
       projectId: params.projectId,
       metadata: params.metadata,
     });
-  } catch (error) {
-    // Don't throw error if logging fails - it shouldn't break the main operation
+  } catch (error: any) {
+    // Log errors but don't throw - we don't want activity logging to break the main flow
     console.error('Failed to log activity:', error);
   }
 }
-
-
-
-
-
-
-
-

@@ -7,7 +7,8 @@ import Subcontractor from '@/models/Subcontractor';
 import ExcelUpload from '@/models/ExcelUpload';
 import AttendanceMaster from '@/models/AttendanceMaster';
 import AttendanceRaw from '@/models/AttendanceRaw';
-import { logActivity } from '@/lib/activityLogger';
+// COMMENTED OUT - Activity logging (not useable for now)
+// import { logActivity } from '@/lib/activityLogger';
 
 /**
  * POST /api/admin/clear-data
@@ -125,16 +126,16 @@ async function handleClearData(req: AuthenticatedRequest) {
         );
     }
 
-    // Log activity
-    await logActivity({
-      userId: req.user?.userId || '',
-      userEmail: req.user?.email || '',
-      action: 'DELETE',
-      entityType: 'EXCEL',
-      description: `Cleared data: ${dataType}${projectId ? ` (Project: ${projectId})` : ''}`,
-      projectId,
-      metadata: { dataType, result },
-    });
+    // COMMENTED OUT - Activity logging (not useable for now)
+    // await logActivity({
+    //   userId: req.user?.userId || '',
+    //   userEmail: req.user?.email || '',
+    //   action: 'DELETE',
+    //   entityType: 'EXCEL',
+    //   description: `Cleared data: ${dataType}${projectId ? ` (Project: ${projectId})` : ''}`,
+    //   projectId,
+    //   metadata: { dataType, result },
+    // });
 
     return NextResponse.json({
       success: true,
@@ -151,6 +152,9 @@ async function handleClearData(req: AuthenticatedRequest) {
 }
 
 export const POST = withAdmin(handleClearData);
+
+
+
 
 
 

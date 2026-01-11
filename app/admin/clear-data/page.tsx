@@ -24,51 +24,52 @@ function ClearDataComponent() {
 
   const isSuperAdmin = user?.role === 'super-admin';
 
-  const handleClear = async (e: React.FormEvent) => {
-    e.preventDefault();
-    
-    if (!confirm) {
-      setMessage({ type: 'error', text: 'Please confirm by checking the confirmation box' });
-      return;
-    }
+  // COMMENTED OUT - Clear data functionality (not useable for now)
+  // const handleClear = async (e: React.FormEvent) => {
+  //   e.preventDefault();
+  //   
+  //   if (!confirm) {
+  //     setMessage({ type: 'error', text: 'Please confirm by checking the confirmation box' });
+  //     return;
+  //   }
 
-    if (!dataType) {
-      setMessage({ type: 'error', text: 'Please select data type to clear' });
-      return;
-    }
+  //   if (!dataType) {
+  //     setMessage({ type: 'error', text: 'Please select data type to clear' });
+  //     return;
+  //   }
 
-    setClearing(true);
-    setMessage(null);
+  //   setClearing(true);
+  //   setMessage(null);
 
-    try {
-      const response = await fetch('/api/admin/clear-data', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          dataType,
-          projectId: projectId || undefined,
-          confirm: true,
-        }),
-      });
+  //   try {
+  //     const response = await fetch('/api/admin/clear-data', {
+  //       method: 'POST',
+  //       headers: {
+  //         'Authorization': `Bearer ${token}`,
+  //         'Content-Type': 'application/json',
+  //       },
+  //       body: JSON.stringify({
+  //         dataType,
+  //         projectId: projectId || undefined,
+  //         confirm: true,
+  //       }),
+  //     });
 
-      const result = await response.json();
-      if (result.success) {
-        setMessage({ type: 'success', text: result.message || 'Data cleared successfully' });
-        setConfirm(false);
-        setDataType('');
-        setProjectId('');
-      } else {
-        setMessage({ type: 'error', text: result.error || 'Failed to clear data' });
-      }
-    } catch (err: any) {
-      setMessage({ type: 'error', text: err.message || 'Failed to clear data' });
-    } finally {
-      setClearing(false);
-    }
-  };
+  //     const result = await response.json();
+  //     if (result.success) {
+  //       setMessage({ type: 'success', text: result.message || 'Data cleared successfully' });
+  //       setConfirm(false);
+  //       setDataType('');
+  //       setProjectId('');
+  //     } else {
+  //       setMessage({ type: 'error', text: result.error || 'Failed to clear data' });
+  //     }
+  //   } catch (err: any) {
+  //     setMessage({ type: 'error', text: err.message || 'Failed to clear data' });
+  //   } finally {
+  //     setClearing(false);
+  //   }
+  // };
 
   return (
     <div className="min-h-screen bg-gray-50 p-6">
@@ -88,7 +89,8 @@ function ClearDataComponent() {
           </div>
         )}
 
-        <form onSubmit={handleClear} className="bg-white rounded-lg shadow p-6 space-y-4">
+        {/* COMMENTED OUT - Clear data form (not useable for now) */}
+        <form onSubmit={(e) => e.preventDefault()} className="bg-white rounded-lg shadow p-6 space-y-4 opacity-50 pointer-events-none">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">
               Data Type *
@@ -166,6 +168,9 @@ function ClearDataComponent() {
     </div>
   );
 }
+
+
+
 
 
 

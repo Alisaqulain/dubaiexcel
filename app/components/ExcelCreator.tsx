@@ -200,23 +200,70 @@ export default function ExcelCreator({ labourType, onFileCreated, useCustomForma
         const data = new Uint8Array(event.target?.result as ArrayBuffer);
         const workbook = XLSX.read(data, { type: 'array' });
         const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
-        const jsonData = XLSX.utils.sheet_to_json(firstSheet, { defval: '', raw: false });
-
-        if (jsonData.length === 0) {
-          setMessage({ type: 'error', text: 'Excel file is empty' });
+        
+        // Read as array first to get headers for better mapping
+        const allData = XLSX.utils.sheet_to_json(firstSheet, { header: 1, defval: '' }) as any[][];
+        
+        if (allData.length < 2) {
+          setMessage({ type: 'error', text: 'Excel file must have at least a header row and one data row' });
           return;
         }
 
-        // Map imported data to our columns
-        const newRows: ExcelRow[] = jsonData.map((row: any) => {
-          const newRow: ExcelRow = {};
-          columnNames.forEach(colName => {
-            // Try different possible column name variations
-            newRow[colName] = row[colName] || row[colName.toLowerCase()] || row[colName.toUpperCase()] || 
-                         row[colName.replace(/\s+/g, '')] || row[colName.replace(/\s+/g, '_')] || '';
-          });
-          return newRow;
+        // Get headers from first row
+        const excelHeaders = (allData[0] as string[]).map((h: any) => String(h).trim());
+        
+        // Create a mapping function to find Excel column index for each expected column
+        const getExcelColumnIndex = (expectedColName: string): number => {
+          // Try exact match first
+          let index = excelHeaders.findIndex(h => h === expectedColName);
+          if (index !== -1) return index;
+          
+          // Try case-insensitive match
+          index = excelHeaders.findIndex(h => h.toLowerCase() === expectedColName.toLowerCase());
+          if (index !== -1) return index;
+          
+          // Try with spaces removed
+          const expectedNoSpaces = expectedColName.replace(/\s+/g, '');
+          index = excelHeaders.findIndex(h => h.replace(/\s+/g, '') === expectedNoSpaces);
+          if (index !== -1) return index;
+          
+          // Try with underscores
+          const expectedUnderscore = expectedColName.replace(/\s+/g, '_');
+          index = excelHeaders.findIndex(h => h.replace(/\s+/g, '_').toLowerCase() === expectedUnderscore.toLowerCase());
+          if (index !== -1) return index;
+          
+          return -1;
+        };
+
+        // Create column mapping
+        const columnMapping: { [key: string]: number } = {};
+        columnNames.forEach(colName => {
+          const index = getExcelColumnIndex(colName);
+          if (index !== -1) {
+            columnMapping[colName] = index;
+          }
         });
+
+        // Map imported data to our columns using the mapping
+        const newRows: ExcelRow[] = allData.slice(1)
+          .filter(row => row && row.length > 0 && row.some((cell: any) => cell !== '' && cell !== null && cell !== undefined)) // Filter empty rows
+          .map((row: any[]) => {
+            const newRow: ExcelRow = {};
+            columnNames.forEach(colName => {
+              const excelIndex = columnMapping[colName];
+              if (excelIndex !== undefined && excelIndex !== -1 && row[excelIndex] !== undefined && row[excelIndex] !== null && row[excelIndex] !== '') {
+                newRow[colName] = String(row[excelIndex]).trim();
+              } else {
+                newRow[colName] = '';
+              }
+            });
+            return newRow;
+          });
+
+        if (newRows.length === 0) {
+          setMessage({ type: 'error', text: `No data rows found. Expected columns: ${columnNames.join(', ')}. Excel headers: ${excelHeaders.join(', ')}` });
+          return;
+        }
 
         setRows([...rows, ...newRows]);
         setShowBulkOptions(false);
