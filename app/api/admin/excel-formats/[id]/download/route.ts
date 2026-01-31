@@ -2,12 +2,14 @@ import { NextRequest, NextResponse } from 'next/server';
 import connectDB from '@/lib/mongodb';
 import { withAdmin, AuthenticatedRequest } from '@/lib/middleware';
 import ExcelFormat from '@/models/ExcelFormat';
+import FormatTemplateData from '@/models/FormatTemplateData';
 import * as XLSX from 'xlsx';
 
 type Column = {
   name: string;
   type: 'text' | 'number' | 'date' | 'email' | 'dropdown';
   required: boolean;
+  editable?: boolean;
   validation?: {
     min?: number;
     max?: number;
@@ -38,41 +40,61 @@ async function handleDownloadFormatTemplate(
       );
     }
 
-    // Create workbook - ONLY column headers and one dummy row, NO metadata
+    // Get template data if exists
+    const templateData = await FormatTemplateData.findOne({ formatId: format._id }).lean();
+    
+    // Create workbook
     const workbook = XLSX.utils.book_new();
 
-    // Get sorted columns - ONLY the format columns, nothing else
-    const sortedColumns = format.columns
-      .sort((a: { order: number }, b: { order: number }) => a.order - b.order);
+    // Get sorted columns
+    const sortedColumns = (format.columns as Column[])
+      .sort((a, b) => a.order - b.order);
 
-    // Create headers row - ONLY column names from format
-    const headers = sortedColumns.map((col: { name: string }) => col.name);
+    // Create headers row
+    const headers = sortedColumns.map((col) => col.name);
 
-    // Create one dummy row with example data based on column type
-    const dummyRow = sortedColumns.map((col: { type: string; validation?: { min?: number; options?: string[] } }) => {
-      switch (col.type) {
-        case 'number':
-          return col.validation?.min || 0;
-        case 'date':
-          return '2024-01-01';
-        case 'email':
-          return 'example@email.com';
-        case 'dropdown':
-          return col.validation?.options?.[0] || 'Example';
-        default:
-          return 'Example';
-      }
-    });
+    // Create data rows - include ALL data from template
+    let dataRows: any[][] = [];
+    
+    if (templateData && templateData.rows && templateData.rows.length > 0) {
+      // Include all rows with all data (both editable and read-only columns)
+      dataRows = templateData.rows.map((row: Record<string, any>) => {
+        return sortedColumns.map((col) => {
+          // Include all data from template, regardless of editable status
+          return row[col.name] !== undefined && row[col.name] !== null ? String(row[col.name]) : '';
+        });
+      });
+    } else {
+      // No template data - create one empty row
+      dataRows = [sortedColumns.map(() => '')];
+    }
 
-    // Create worksheet with ONLY headers and one dummy row - NO other data
-    const data = [headers, dummyRow];
+    // Create worksheet with headers and data rows
+    const data = [headers, ...dataRows];
     const worksheet = XLSX.utils.aoa_to_sheet(data);
     
-    // Set column widths
-    const colWidths = headers.map(() => ({ wch: 20 }));
+    // Protect locked columns (make them read-only in Excel)
+    // Note: XLSX doesn't support cell protection directly, but we can add comments/formatting
+    // For actual protection, users would need to set it in Excel after download
+    
+    // Set column widths - auto-size based on content
+    const colWidths = headers.map((header, idx) => {
+      // Calculate width based on header length
+      let maxWidth = Math.max(header.length, 15);
+      
+      // Check data rows for this column to find max content length
+      if (dataRows.length > 0) {
+        dataRows.forEach(row => {
+          const cellValue = row[idx] ? String(row[idx]) : '';
+          maxWidth = Math.max(maxWidth, Math.min(cellValue.length, 50)); // Cap at 50 chars
+        });
+      }
+      
+      return { wch: Math.min(maxWidth + 2, 50) }; // Add padding, max 50
+    });
     worksheet['!cols'] = colWidths;
     
-    // Add only this one sheet - no other sheets
+    // Add sheet
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Sheet1');
 
     // Generate buffer

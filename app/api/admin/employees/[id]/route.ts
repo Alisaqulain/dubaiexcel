@@ -54,7 +54,7 @@ async function handleUpdateEmployee(
     }
 
     // Update fields
-    if (empId !== undefined) employee.empId = empId;
+    if (empId !== undefined) employee.empId = empId.toUpperCase().trim();
     if (name !== undefined) employee.name = name;
     if (site !== undefined) employee.site = site;
     if (siteType !== undefined) employee.siteType = siteType;

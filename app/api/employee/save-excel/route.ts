@@ -5,6 +5,7 @@ import CreatedExcelFile from '@/models/CreatedExcelFile';
 import User from '@/models/User';
 import Employee from '@/models/Employee';
 import ExcelFormat from '@/models/ExcelFormat';
+import FormatTemplateData from '@/models/FormatTemplateData';
 import * as XLSX from 'xlsx';
 import mongoose from 'mongoose';
 
@@ -151,32 +152,115 @@ async function handleSaveExcel(req: AuthenticatedRequest) {
       console.warn(`Extra columns found: ${extraColumns.join(', ')}`);
     }
 
+    // Validate locked columns - check if user tried to edit locked columns
+    const templateData = await FormatTemplateData.findOne({ formatId: assignedFormat._id }).lean();
+    const lockedColumns = formatColumns.filter((col: any) => col.editable === false);
+    const errors: string[] = [];
+    const warnings: string[] = [];
+
+    if (lockedColumns.length > 0 && templateData && templateData.rows && templateData.rows.length > 0) {
+      // Check each row against template data
+      const dataRows = jsonData.slice(1); // Skip header row
+      
+      for (let rowIndex = 0; rowIndex < Math.min(dataRows.length, templateData.rows.length); rowIndex++) {
+        const userRow = dataRows[rowIndex] as any[];
+        const templateRow = templateData.rows[rowIndex] as Record<string, any>;
+        
+        if (!userRow || !templateRow) continue;
+
+        lockedColumns.forEach((col: any) => {
+          const colIndex = headers.indexOf(col.name);
+          if (colIndex === -1) return;
+
+          const userValue = userRow[colIndex] !== undefined ? String(userRow[colIndex] || '').trim() : '';
+          const templateValue = templateRow[col.name] ? String(templateRow[col.name]).trim() : '';
+
+          // If locked column was modified
+          if (userValue !== templateValue && templateValue !== '') {
+            errors.push(`Row ${rowIndex + 2}: Column "${col.name}" is locked and cannot be edited. Expected: "${templateValue}", Found: "${userValue}"`);
+          }
+        });
+      }
+    }
+
+    // If locked columns were edited, reject the file
+    if (errors.length > 0) {
+      return NextResponse.json({
+        error: 'Locked columns cannot be edited',
+        validationError: true,
+        lockedColumnErrors: errors,
+        message: `You cannot edit locked columns. ${errors.length} error(s) found.`,
+      }, { status: 400 });
+    }
+
     // File is validated, convert to buffer (reuse arrayBuffer from above)
     const buffer = Buffer.from(arrayBuffer);
 
-    // Create the record
-    const createdFile = await CreatedExcelFile.create({
-      filename: `excel_${Date.now()}_${file.name}`,
-      originalFilename: file.name,
-      fileData: buffer,
-      labourType: labourType as 'OUR_LABOUR' | 'SUPPLY_LABOUR' | 'SUBCONTRACTOR',
-      rowCount,
-      createdBy: userId,
-      createdByName: userName,
-      createdByEmail: userEmail,
-    });
+    // Check if this is an update (PUT request with fileId)
+    const fileId = formData.get('fileId') as string;
+    
+    if (fileId && req.method === 'PUT') {
+      // Update existing file
+      const existingFile = await CreatedExcelFile.findById(fileId);
+      
+      if (!existingFile) {
+        return NextResponse.json(
+          { error: 'File not found' },
+          { status: 404 }
+        );
+      }
 
-    return NextResponse.json({
-      success: true,
-      message: 'Excel file saved successfully',
-      data: {
-        id: createdFile._id,
-        filename: createdFile.originalFilename,
-        labourType: createdFile.labourType,
-        rowCount: createdFile.rowCount,
-        createdAt: createdFile.createdAt,
-      },
-    });
+      // Verify the file belongs to this user
+      if (existingFile.createdBy.toString() !== userId) {
+        return NextResponse.json(
+          { error: 'Unauthorized: You can only edit your own files' },
+          { status: 403 }
+        );
+      }
+
+      // Update the file
+      existingFile.originalFilename = file.name;
+      existingFile.fileData = buffer;
+      existingFile.rowCount = rowCount;
+      await existingFile.save();
+
+      return NextResponse.json({
+        success: true,
+        message: 'Excel file updated successfully',
+        data: {
+          id: existingFile._id,
+          filename: existingFile.originalFilename,
+          labourType: existingFile.labourType,
+          rowCount: existingFile.rowCount,
+          createdAt: existingFile.createdAt,
+          updatedAt: existingFile.updatedAt,
+        },
+      });
+    } else {
+      // Create new file
+      const createdFile = await CreatedExcelFile.create({
+        filename: `excel_${Date.now()}_${file.name}`,
+        originalFilename: file.name,
+        fileData: buffer,
+        labourType: labourType as 'OUR_LABOUR' | 'SUPPLY_LABOUR' | 'SUBCONTRACTOR',
+        rowCount,
+        createdBy: userId,
+        createdByName: userName,
+        createdByEmail: userEmail,
+      });
+
+      return NextResponse.json({
+        success: true,
+        message: 'Excel file saved successfully',
+        data: {
+          id: createdFile._id,
+          filename: createdFile.originalFilename,
+          labourType: createdFile.labourType,
+          rowCount: createdFile.rowCount,
+          createdAt: createdFile.createdAt,
+        },
+      });
+    }
   } catch (error: any) {
     console.error('Save Excel error:', error);
     return NextResponse.json(
@@ -187,4 +271,5 @@ async function handleSaveExcel(req: AuthenticatedRequest) {
 }
 
 export const POST = withAuth(handleSaveExcel);
+export const PUT = withAuth(handleSaveExcel);
 

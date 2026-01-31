@@ -52,8 +52,9 @@ async function handleCreateEmployee(req: AuthenticatedRequest) {
 
     // Prepare employee data
     // Note: Password will be hashed by the pre-save hook in the Employee model
+    // Normalize empId to uppercase for consistency
     const employeeData: any = {
-      empId,
+      empId: empId.toUpperCase().trim(),
       name,
       site,
       siteType: siteType || 'OTHER',
@@ -104,8 +105,34 @@ async function handleCreateEmployee(req: AuthenticatedRequest) {
   }
 }
 
+/**
+ * DELETE /api/admin/employees
+ * Delete all employees
+ */
+async function handleDeleteAllEmployees(req: AuthenticatedRequest) {
+  try {
+    await connectDB();
+
+    const result = await Employee.deleteMany({});
+
+    return NextResponse.json({
+      success: true,
+      message: `Successfully deleted ${result.deletedCount} employees`,
+      deletedCount: result.deletedCount,
+    });
+  } catch (error: any) {
+    console.error('Delete all employees error:', error);
+    return NextResponse.json(
+      { error: error.message || 'Failed to delete employees' },
+      { status: 500 }
+    );
+  }
+}
+
 // GET allows view access for all authenticated users (admin, super-admin, e1-user)
 export const GET = withViewAccess(handleGetEmployees);
 // POST requires admin or super-admin
 export const POST = withAdmin(handleCreateEmployee);
+// DELETE requires admin or super-admin
+export const DELETE = withAdmin(handleDeleteAllEmployees);
 

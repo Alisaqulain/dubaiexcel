@@ -90,7 +90,7 @@ export default function Navigation() {
                     isActive('/admin/employees') ? 'bg-blue-800' : 'hover:bg-blue-700'
                   }`}
                 >
-                  Employees
+                  Users
                   {employeeCounts && (
                     <span className="ml-2 flex items-center gap-1">
                       <span className="px-1.5 py-0.5 text-xs rounded bg-green-500">
@@ -101,6 +101,14 @@ export default function Navigation() {
                       </span>
                     </span>
                   )}
+                </Link>
+                <Link
+                  href="/admin/excel-employees"
+                  className={`flex items-center px-3 py-2 rounded-md text-sm font-medium ${
+                    isActive('/admin/excel-employees') ? 'bg-blue-800' : 'hover:bg-blue-700'
+                  }`}
+                >
+                  Excel Employees
                 </Link>
                 <Link
                   href="/admin/excel-formats"

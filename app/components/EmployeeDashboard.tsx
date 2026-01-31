@@ -2,18 +2,16 @@
 
 import { useEffect, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
-import ExcelUploadNew from './ExcelUploadNew';
 import ExcelCreator from './ExcelCreator';
 
-interface UploadRecord {
+
+interface CreatedFile {
   _id: string;
   originalFilename: string;
   labourType: string;
-  status: string;
   rowCount: number;
-  processedCount: number;
-  errorCount: number;
   createdAt: string;
+  updatedAt?: string;
 }
 
 interface ExcelFormat {
@@ -35,38 +33,23 @@ interface ExcelFormat {
 
 export default function EmployeeDashboard() {
   const { user, token } = useAuth();
-  const [uploads, setUploads] = useState<UploadRecord[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading] = useState(false);
   const [formats, setFormats] = useState<ExcelFormat[]>([]);
   const [loadingFormats, setLoadingFormats] = useState(true);
   const [selectedFormat, setSelectedFormat] = useState<ExcelFormat | null>(null);
   const [showExcelCreator, setShowExcelCreator] = useState(false);
   const [createdFile, setCreatedFile] = useState<File | null>(null);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [myCreatedFiles, setMyCreatedFiles] = useState<CreatedFile[]>([]);
+  const [loadingCreatedFiles, setLoadingCreatedFiles] = useState(true);
+  const [editingFileId, setEditingFileId] = useState<string | null>(null);
+  const [viewingFileId, setViewingFileId] = useState<string | null>(null);
+  const [fileData, setFileData] = useState<any[]>([]);
 
   useEffect(() => {
-    fetchMyUploads();
     fetchMyFormats();
+    fetchMyCreatedFiles();
   }, []);
-
-  const fetchMyUploads = async () => {
-    try {
-      const token = localStorage.getItem('token');
-      const response = await fetch('/api/employee/uploads', {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
-      });
-      const result = await response.json();
-      if (result.success) {
-        setUploads(result.data || []);
-      }
-    } catch (err: any) {
-      console.error('Failed to fetch uploads:', err);
-    } finally {
-      setLoading(false);
-    }
-  };
 
   const fetchMyFormats = async () => {
     try {
@@ -84,6 +67,73 @@ export default function EmployeeDashboard() {
       console.error('Failed to fetch formats:', err);
     } finally {
       setLoadingFormats(false);
+    }
+  };
+
+  const fetchMyCreatedFiles = async () => {
+    try {
+      setLoadingCreatedFiles(true);
+      const token = localStorage.getItem('token');
+      const response = await fetch('/api/employee/created-excel-files', {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+        },
+      });
+      const result = await response.json();
+      if (result.success) {
+        setMyCreatedFiles(result.data || []);
+      }
+    } catch (err: any) {
+      console.error('Failed to fetch created files:', err);
+    } finally {
+      setLoadingCreatedFiles(false);
+    }
+  };
+
+  const handleViewFile = async (fileId: string) => {
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch(`/api/employee/created-excel-files/${fileId}`, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+        },
+      });
+      const result = await response.json();
+      if (result.success) {
+        setFileData(result.data.data);
+        setViewingFileId(fileId);
+      } else {
+        setMessage({ type: 'error', text: result.error || 'Failed to load file' });
+      }
+    } catch (err: any) {
+      setMessage({ type: 'error', text: err.message || 'Failed to load file' });
+    }
+  };
+
+  const handleEditFile = async (fileId: string) => {
+    try {
+      const token = localStorage.getItem('token');
+      const response = await fetch(`/api/employee/created-excel-files/${fileId}`, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+        },
+      });
+      const result = await response.json();
+      if (result.success) {
+        setFileData(result.data.data);
+        setEditingFileId(fileId);
+        setViewingFileId(null);
+        // Find the format for this file (you might need to store formatId with the file)
+        // For now, we'll use the selected format or first format
+        if (formats.length > 0 && !selectedFormat) {
+          setSelectedFormat(formats[0]);
+        }
+        setShowExcelCreator(true);
+      } else {
+        setMessage({ type: 'error', text: result.error || 'Failed to load file for editing' });
+      }
+    } catch (err: any) {
+      setMessage({ type: 'error', text: err.message || 'Failed to load file for editing' });
     }
   };
 
@@ -123,7 +173,7 @@ export default function EmployeeDashboard() {
         
         <div className="bg-white rounded-lg shadow p-6 mb-6">
           <h2 className="text-xl font-semibold mb-4">Welcome, {user?.name || (user as any)?.empId || 'Employee'}</h2>
-          <p className="text-gray-600">Create, download, and upload your Excel files here. All uploads will be validated and reviewed by administrators.</p>
+          <p className="text-gray-600">Create and save your Excel files here. All saved files will be visible to administrators.</p>
         </div>
 
         {message && (
@@ -188,6 +238,12 @@ export default function EmployeeDashboard() {
                       className="w-full px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 text-sm font-medium flex items-center justify-center gap-2"
                     >
                       ✏️ Work with this Format
+                    </button>
+                    <button
+                      onClick={() => handleDownloadTemplate(format._id, format.name)}
+                      className="w-full px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 text-sm font-medium flex items-center justify-center gap-2"
+                    >
+                      📥 Download Template
                     </button>
                   </div>
                   
@@ -272,6 +328,9 @@ export default function EmployeeDashboard() {
                 onClick={() => {
                   setShowExcelCreator(false);
                   setSelectedFormat(null);
+                  setEditingFileId(null);
+                  setFileData([]);
+                  setViewingFileId(null);
                 }}
                 className="px-4 py-2 text-gray-600 hover:text-gray-800 border border-gray-300 rounded-md"
               >
@@ -282,34 +341,34 @@ export default function EmployeeDashboard() {
               labourType="OUR_LABOUR"
               useCustomFormat={true}
               formatId={selectedFormat._id}
+              editingFileId={editingFileId || undefined}
+              initialData={fileData.length > 0 ? fileData : undefined}
               onFileCreated={(file) => {
                 setCreatedFile(file);
-                setMessage({ type: 'success', text: 'Excel file created! You can now save it or upload it below.' });
-              }} 
+              }}
+              onSaveSuccess={() => {
+                // Refresh the saved files list after saving
+                fetchMyCreatedFiles();
+              }}
+              onSaveAndClose={() => {
+                setShowExcelCreator(false);
+                setSelectedFormat(null);
+                setEditingFileId(null);
+                setFileData([]);
+                fetchMyCreatedFiles();
+                setMessage({ type: 'success', text: 'File saved successfully!' });
+              }}
             />
           </div>
         )}
 
+        {/* My Created Files Section */}
         <div className="bg-white rounded-lg shadow p-6 mb-6">
-          <h2 className="text-xl font-semibold mb-4">Upload Excel File</h2>
-          <div className="mb-4 p-4 bg-yellow-50 rounded-lg border border-yellow-300">
-            <h3 className="font-semibold text-yellow-900 mb-2">⚠️ Format Validation Required</h3>
-            <p className="text-sm text-yellow-800 mb-2">
-              <strong>Your Excel file will be validated against your assigned format before upload.</strong>
-            </p>
-            <p className="text-sm text-yellow-700">
-              If the format doesn&apos;t match, you&apos;ll see detailed errors and must fix the file before uploading.
-            </p>
-          </div>
-          <ExcelUploadNew onUploadSuccess={fetchMyUploads} />
-        </div>
-
-        <div className="bg-white rounded-lg shadow p-6">
-          <h2 className="text-xl font-semibold mb-4">My Uploads</h2>
-          {loading ? (
+          <h2 className="text-xl font-semibold mb-4">My Saved Excel Files</h2>
+          {loadingCreatedFiles ? (
             <div className="text-center py-8">Loading...</div>
-          ) : uploads.length === 0 ? (
-            <div className="text-center py-8 text-gray-500">No uploads yet. Upload your first Excel file above.</div>
+          ) : myCreatedFiles.length === 0 ? (
+            <div className="text-center py-8 text-gray-500">No saved files yet. Create your first Excel file above.</div>
           ) : (
             <div className="overflow-x-auto">
               <table className="min-w-full divide-y divide-gray-200">
@@ -317,41 +376,43 @@ export default function EmployeeDashboard() {
                   <tr>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Filename</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Labour Type</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
                     <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Rows</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Processed</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Errors</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Upload Date</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Created</th>
+                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-gray-200">
-                  {uploads.map((upload) => (
-                    <tr key={upload._id} className="hover:bg-gray-50">
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{upload.originalFilename}</td>
+                  {myCreatedFiles.map((file) => (
+                    <tr key={file._id} className="hover:bg-gray-50">
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{file.originalFilename}</td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
                         <span className={`px-2 py-1 text-xs rounded-full ${
-                          upload.labourType === 'OUR_LABOUR' ? 'bg-blue-100 text-blue-800' :
-                          upload.labourType === 'SUPPLY_LABOUR' ? 'bg-green-100 text-green-800' :
+                          file.labourType === 'OUR_LABOUR' ? 'bg-blue-100 text-blue-800' :
+                          file.labourType === 'SUPPLY_LABOUR' ? 'bg-green-100 text-green-800' :
                           'bg-purple-100 text-purple-800'
                         }`}>
-                          {upload.labourType.replace('_', ' ')}
+                          {file.labourType.replace('_', ' ')}
                         </span>
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <span className={`px-2 py-1 text-xs rounded-full ${
-                          upload.status === 'PROCESSED' ? 'bg-green-100 text-green-800' :
-                          upload.status === 'MERGED' ? 'bg-blue-100 text-blue-800' :
-                          upload.status === 'ERROR' ? 'bg-red-100 text-red-800' :
-                          'bg-yellow-100 text-yellow-800'
-                        }`}>
-                          {upload.status}
-                        </span>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{upload.rowCount}</td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{upload.processedCount}</td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{upload.errorCount}</td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{file.rowCount}</td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                        {new Date(upload.createdAt).toLocaleDateString()}
+                        {new Date(file.createdAt).toLocaleString()}
+                      </td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                        <div className="flex gap-2">
+                          <button
+                            onClick={() => handleViewFile(file._id)}
+                            className="text-blue-600 hover:text-blue-900"
+                          >
+                            Show
+                          </button>
+                          <button
+                            onClick={() => handleEditFile(file._id)}
+                            className="text-green-600 hover:text-green-900"
+                          >
+                            Edit
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -360,6 +421,49 @@ export default function EmployeeDashboard() {
             </div>
           )}
         </div>
+
+        {/* View File Modal */}
+        {viewingFileId && fileData.length > 0 && (
+          <div className="bg-white rounded-lg shadow p-6 mb-6">
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="text-xl font-semibold">View File Data</h2>
+              <button
+                onClick={() => {
+                  setViewingFileId(null);
+                  setFileData([]);
+                }}
+                className="px-4 py-2 text-gray-600 hover:text-gray-800 border border-gray-300 rounded-md"
+              >
+                Close
+              </button>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-gray-200">
+                <thead className="bg-gray-50">
+                  <tr>
+                    {Object.keys(fileData[0] || {}).map((key) => (
+                      <th key={key} className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+                        {key}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200">
+                  {fileData.map((row, idx) => (
+                    <tr key={idx} className="hover:bg-gray-50">
+                      {Object.values(row).map((value: any, colIdx) => (
+                        <td key={colIdx} className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                          {value || ''}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
       </div>
     </div>
   );

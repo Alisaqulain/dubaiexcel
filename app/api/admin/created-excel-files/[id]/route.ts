@@ -25,6 +25,8 @@ async function handleDeleteExcelFile(
     }
 
     // Delete the file
+    // Note: It's safe to delete original files even if they're referenced by merged files
+    // because merged files already contain all the data independently
     const deletedFile = await CreatedExcelFile.findByIdAndDelete(fileId);
 
     if (!deletedFile) {
@@ -56,6 +58,9 @@ export async function DELETE(
   });
   return handler(req);
 }
+
+
+
 
 
 

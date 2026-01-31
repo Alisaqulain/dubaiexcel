@@ -22,13 +22,24 @@ export async function POST(request: NextRequest) {
     // Support employee login (by Employee ID)
     // Try employee login if loginType is 'employee' or if identifier looks like an Employee ID (starts with EMP)
     const identifier = loginIdentifier || email || username;
-    const isEmployeeLogin = loginType === 'employee' || (identifier && identifier.toUpperCase().startsWith('EMP'));
+    const isEmployeeLogin = loginType === 'employee' || (identifier && (identifier.toUpperCase().startsWith('EMP') || identifier.match(/^[A-Z0-9]+$/i)));
     
     if (isEmployeeLogin && identifier) {
-      // Find employee by Employee ID - need to select password field
-      const employee = await Employee.findOne({ empId: identifier.toUpperCase() })
+      // Find employee by Employee ID - case-insensitive search
+      // Try exact match first, then case-insensitive
+      const empIdUpper = identifier.toUpperCase().trim();
+      let employee = await Employee.findOne({ empId: empIdUpper })
         .select('+password')
         .lean();
+      
+      // If not found with uppercase, try case-insensitive regex search
+      if (!employee) {
+        employee = await Employee.findOne({ 
+          empId: { $regex: new RegExp(`^${identifier.trim()}$`, 'i') }
+        })
+        .select('+password')
+        .lean();
+      }
       
       if (employee) {
         // Check if employee is active
@@ -40,39 +51,40 @@ export async function POST(request: NextRequest) {
         }
 
         // Verify password
-        if (employee.password) {
-          const isPasswordValid = await bcrypt.compare(password, employee.password);
-          if (isPasswordValid) {
-            // Generate token for employee
-            const token = generateToken({
-              userId: employee._id.toString(),
-              email: employee.empId,
-              role: 'employee',
-            });
-
-            return NextResponse.json({
-              success: true,
-              token,
-              user: {
-                id: employee._id,
-                email: employee.empId,
-                empId: employee.empId,
-                role: 'employee',
-                name: employee.name,
-              },
-            });
-          } else {
-            return NextResponse.json(
-              { error: 'Invalid credentials' },
-              { status: 401 }
-            );
-          }
-        } else {
+        if (!employee.password) {
           return NextResponse.json(
-            { error: 'Employee account has no password set. Please contact administrator.' },
+            { error: 'Employee account has no password set. Please contact administrator to set a password.' },
             { status: 403 }
           );
         }
+
+        // Verify password
+        const isPasswordValid = await bcrypt.compare(password, employee.password);
+        if (!isPasswordValid) {
+          return NextResponse.json(
+            { error: 'Invalid Employee ID or password' },
+            { status: 401 }
+          );
+        }
+
+        // Password is valid, generate token
+        const token = generateToken({
+          userId: employee._id.toString(),
+          email: employee.empId,
+          role: 'employee',
+        });
+
+        return NextResponse.json({
+          success: true,
+          token,
+          user: {
+            id: employee._id,
+            email: employee.empId,
+            empId: employee.empId,
+            role: 'employee',
+            name: employee.name,
+          },
+        });
       }
       // If employee not found and loginType is employee, return error
       if (loginType === 'employee') {

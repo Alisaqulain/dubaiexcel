@@ -32,6 +32,7 @@ function EmployeesComponent() {
   const [showForm, setShowForm] = useState(false);
   const [editingEmployeeId, setEditingEmployeeId] = useState<string | null>(null);
   const [deletingEmployeeId, setDeletingEmployeeId] = useState<string | null>(null);
+  const [deletingAll, setDeletingAll] = useState(false);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [bulkUploadFile, setBulkUploadFile] = useState<File | null>(null);
   const [uploadingBulk, setUploadingBulk] = useState(false);
@@ -96,13 +97,13 @@ function EmployeesComponent() {
 
         const result = await response.json();
         if (result.success) {
-          setMessage({ type: 'success', text: 'Employee updated successfully' });
+          setMessage({ type: 'success', text: 'User updated successfully' });
           setShowForm(false);
           setEditingEmployeeId(null);
           resetForm();
           fetchEmployees();
         } else {
-          setMessage({ type: 'error', text: result.error || 'Failed to update employee' });
+          setMessage({ type: 'error', text: result.error || 'Failed to update user' });
         }
       } else {
         // Create new employee
@@ -126,17 +127,17 @@ function EmployeesComponent() {
 
         const result = await response.json();
         if (result.success) {
-          setMessage({ type: 'success', text: 'Employee created successfully' });
+          setMessage({ type: 'success', text: 'User created successfully' });
           setShowForm(false);
           resetForm();
           fetchEmployees();
         } else {
-          setMessage({ type: 'error', text: result.error || 'Failed to create employee' });
+          setMessage({ type: 'error', text: result.error || 'Failed to create user' });
         }
       }
     } catch (err: any) {
-      setMessage({ type: 'error', text: err.message || 'Failed to save employee' });
-      console.error('Failed to save employee:', err);
+      setMessage({ type: 'error', text: err.message || 'Failed to save user' });
+      console.error('Failed to save user:', err);
     }
   };
 
@@ -179,7 +180,7 @@ function EmployeesComponent() {
   };
 
   const handleDelete = async (employeeId: string) => {
-    if (!confirm('Are you sure you want to delete this employee?')) {
+    if (!confirm('Are you sure you want to delete this user?')) {
       return;
     }
 
@@ -195,15 +196,48 @@ function EmployeesComponent() {
 
       const result = await response.json();
       if (result.success) {
-        setMessage({ type: 'success', text: 'Employee deleted successfully' });
+        setMessage({ type: 'success', text: 'User deleted successfully' });
         fetchEmployees();
       } else {
-        setMessage({ type: 'error', text: result.error || 'Failed to delete employee' });
+        setMessage({ type: 'error', text: result.error || 'Failed to delete user' });
       }
     } catch (err: any) {
-      setMessage({ type: 'error', text: err.message || 'Failed to delete employee' });
+      setMessage({ type: 'error', text: err.message || 'Failed to delete user' });
     } finally {
       setDeletingEmployeeId(null);
+    }
+  };
+
+  const handleDeleteAll = async () => {
+    if (!confirm(`Are you sure you want to delete ALL ${employees.length} users? This action cannot be undone!`)) {
+      return;
+    }
+
+    if (!confirm('This will permanently delete all users. Are you absolutely sure?')) {
+      return;
+    }
+
+    try {
+      setDeletingAll(true);
+      setMessage(null);
+      const response = await fetch('/api/admin/employees', {
+        method: 'DELETE',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+        },
+      });
+
+      const result = await response.json();
+      if (result.success) {
+        setMessage({ type: 'success', text: result.message || `Successfully deleted ${result.deletedCount} users` });
+        fetchEmployees();
+      } else {
+        setMessage({ type: 'error', text: result.error || 'Failed to delete users' });
+      }
+    } catch (err: any) {
+      setMessage({ type: 'error', text: err.message || 'Failed to delete users' });
+    } finally {
+      setDeletingAll(false);
     }
   };
 
@@ -223,7 +257,7 @@ function EmployeesComponent() {
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = 'employee_template.xlsx';
+      a.download = 'user_template.xlsx';
       document.body.appendChild(a);
       a.click();
       window.URL.revokeObjectURL(url);
@@ -275,7 +309,7 @@ function EmployeesComponent() {
         return -1;
       };
 
-      const empIdIndex = getColumnIndex(['Employee ID', 'EmployeeID', 'empId', 'EMP ID', 'Emp ID', 'Employee Id']);
+      const empIdIndex = getColumnIndex(['User ID', 'UserID', 'empId', 'USER ID', 'User Id', 'Employee ID', 'EmployeeID', 'EMP ID', 'Emp ID', 'Employee Id']);
       const nameIndex = getColumnIndex(['Name', 'NAME']);
       const siteIndex = getColumnIndex(['Site', 'SITE']);
       const siteTypeIndex = getColumnIndex(['Site Type', 'SiteType', 'siteType', 'SITE TYPE', 'Site Type']);
@@ -289,7 +323,7 @@ function EmployeesComponent() {
       if (empIdIndex === -1 || nameIndex === -1 || siteIndex === -1 || roleIndex === -1) {
         setMessage({ 
           type: 'error', 
-          text: `Missing required columns. Found headers: ${headers.join(', ')}. Required: Employee ID, Name, Site, Role` 
+          text: `Missing required columns. Found headers: ${headers.join(', ')}. Required: User ID, Name, Site, Role` 
         });
         setUploadingBulk(false);
         return;
@@ -350,7 +384,7 @@ function EmployeesComponent() {
       if (employees.length === 0) {
         setMessage({ 
           type: 'error', 
-          text: `No valid employee data found. Found headers: ${headers.join(', ')}. Required headers: Employee ID, Name, Site, Role` 
+          text: `No valid user data found. Found headers: ${headers.join(', ')}. Required headers: User ID, Name, Site, Role` 
         });
         setUploadingBulk(false);
         return;
@@ -373,7 +407,7 @@ function EmployeesComponent() {
       const result = await response.json();
       if (result.success) {
         const { created, failed, errors } = result.data;
-        let messageText = `Successfully created ${created} employee(s)`;
+        let messageText = `Successfully created ${created} user(s)`;
         if (failed > 0) {
           messageText += `. ${failed} failed.`;
           if (errors.length > 0) {
@@ -391,7 +425,7 @@ function EmployeesComponent() {
         if (fileInput) fileInput.value = '';
         fetchEmployees();
       } else {
-        setMessage({ type: 'error', text: result.error || 'Failed to upload employees' });
+        setMessage({ type: 'error', text: result.error || 'Failed to upload users' });
       }
     } catch (err: any) {
       setMessage({ type: 'error', text: err.message || 'Failed to process bulk upload' });
@@ -408,8 +442,15 @@ function EmployeesComponent() {
     <div className="min-h-screen bg-gray-50 p-6">
       <div className="max-w-7xl mx-auto">
         <div className="flex justify-between items-center mb-6">
-          <h1 className="text-3xl font-bold">Employees</h1>
+          <h1 className="text-3xl font-bold">Users</h1>
           <div className="flex gap-2">
+            <button
+              onClick={handleDeleteAll}
+              disabled={deletingAll || employees.length === 0}
+              className="bg-red-600 text-white px-4 py-2 rounded-md hover:bg-red-700 disabled:opacity-50"
+            >
+              {deletingAll ? 'Deleting...' : `Delete All (${employees.length})`}
+            </button>
             <button
               onClick={handleDownloadTemplate}
               className="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700"
@@ -450,7 +491,7 @@ function EmployeesComponent() {
               }}
               className="bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700"
             >
-              {showForm ? 'Cancel' : 'Add Employee'}
+              {showForm ? 'Cancel' : 'Add User'}
             </button>
           </div>
         </div>
@@ -465,7 +506,7 @@ function EmployeesComponent() {
 
         {showBulkUpload && (
           <div className="bg-white rounded-lg shadow p-6 mb-6">
-            <h2 className="text-xl font-semibold mb-4">Bulk Upload Employees</h2>
+            <h2 className="text-xl font-semibold mb-4">Bulk Upload Users</h2>
             <div className="space-y-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -495,7 +536,7 @@ function EmployeesComponent() {
                   disabled={!bulkUploadFile || uploadingBulk}
                   className="bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700 disabled:opacity-50"
                 >
-                  {uploadingBulk ? 'Uploading...' : 'Upload Employees'}
+                  {uploadingBulk ? 'Uploading...' : 'Upload Users'}
                 </button>
                 <button
                   onClick={handleDownloadTemplate}
@@ -508,8 +549,8 @@ function EmployeesComponent() {
                 <p className="font-semibold mb-2">Instructions:</p>
                 <ul className="list-disc list-inside space-y-1">
                   <li>Download the template to see the required format</li>
-                  <li>Fill in the employee data in the Excel file</li>
-                  <li>Required fields: Employee ID, Name, Site, Role</li>
+                  <li>Fill in the user data in the Excel file</li>
+                  <li>Required fields: User ID, Name, Site, Role</li>
                   <li>Active field: Use &quot;Yes&quot; or &quot;No&quot; (default: Yes)</li>
                   <li>Site Type options: HEAD_OFFICE, MEP, CIVIL, OTHER, OUTSOURCED, SUPPORT</li>
                   <li>Labour Type options: OUR_LABOUR, SUPPLY_LABOUR, SUBCONTRACTOR</li>
@@ -522,12 +563,12 @@ function EmployeesComponent() {
         {showForm && (
           <div className="bg-white rounded-lg shadow p-6 mb-6">
             <h2 className="text-xl font-semibold mb-4">
-              {editingEmployeeId ? 'Edit Employee' : 'Add New Employee'}
+              {editingEmployeeId ? 'Edit User' : 'Add New User'}
             </h2>
             <form onSubmit={handleSubmit} className="grid grid-cols-2 gap-4">
               <input
                 type="text"
-                placeholder="Employee ID"
+                placeholder="User ID"
                 value={formData.empId}
                 onChange={(e) => setFormData({ ...formData, empId: e.target.value })}
                 required
@@ -610,7 +651,7 @@ function EmployeesComponent() {
                 type="submit"
                 className="col-span-2 bg-blue-600 text-white py-2 rounded-md hover:bg-blue-700"
               >
-                {editingEmployeeId ? 'Update Employee' : 'Create Employee'}
+                {editingEmployeeId ? 'Update User' : 'Create User'}
               </button>
             </form>
           </div>
@@ -620,7 +661,7 @@ function EmployeesComponent() {
           <table className="min-w-full divide-y divide-gray-200">
             <thead className="bg-gray-50">
               <tr>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Employee ID</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">User ID</th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Site</th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Site Type</th>

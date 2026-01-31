@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import connectDB from '@/lib/mongodb';
 import { withAuth, AuthenticatedRequest } from '@/lib/middleware';
 import ExcelFormat from '@/models/ExcelFormat';
+import FormatTemplateData from '@/models/FormatTemplateData';
 import mongoose from 'mongoose';
 
 /**
@@ -63,9 +64,20 @@ async function handleGetFormat(
       );
     }
 
+    // Get template data if exists
+    const templateData = await FormatTemplateData.findOne({ formatId: format._id })
+      .select('rows')
+      .lean();
+
+    // Include template rows in response
+    const responseData: any = { ...format };
+    if (templateData && templateData.rows) {
+      responseData.templateRows = templateData.rows;
+    }
+
     return NextResponse.json({
       success: true,
-      data: format,
+      data: responseData,
     });
   } catch (error: any) {
     console.error('Get format error:', error);
@@ -85,6 +97,17 @@ export async function GET(
   });
   return handler(req);
 }
+
+
+
+
+
+
+
+
+
+
+
 
 
 

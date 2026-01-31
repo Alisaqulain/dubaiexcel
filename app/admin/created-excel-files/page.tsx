@@ -59,6 +59,7 @@ function CreatedExcelFilesComponent() {
   const [analyzingFileId, setAnalyzingFileId] = useState<string | null>(null);
   const [fileAnalyses, setFileAnalyses] = useState<{ [fileId: string]: FileAnalysis }>({});
   const [expandedFileId, setExpandedFileId] = useState<string | null>(null);
+  const [mergeAttendanceStats, setMergeAttendanceStats] = useState<AttendanceStats | null>(null);
 
   useEffect(() => {
     fetchFiles();
@@ -101,32 +102,31 @@ function CreatedExcelFilesComponent() {
     );
   };
 
-  // COMMENTED OUT - Download excel functionality (not useable for now)
-  // const handleDownload = async (fileId: string, filename: string) => {
-  //   try {
-  //     const response = await fetch(`/api/admin/created-excel-files/${fileId}/download`, {
-  //       headers: {
-  //         'Authorization': `Bearer ${token}`,
-  //       },
-  //     });
+  const handleDownload = async (fileId: string, filename: string) => {
+    try {
+      const response = await fetch(`/api/admin/created-excel-files/${fileId}/download`, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+        },
+      });
 
-  //     if (!response.ok) {
-  //       throw new Error('Failed to download file');
-  //     }
+      if (!response.ok) {
+        throw new Error('Failed to download file');
+      }
 
-  //     const blob = await response.blob();
-  //     const url = window.URL.createObjectURL(blob);
-  //     const a = document.createElement('a');
-  //     a.href = url;
-  //     a.download = filename;
-  //     document.body.appendChild(a);
-  //     a.click();
-  //     window.URL.revokeObjectURL(url);
-  //     document.body.removeChild(a);
-  //   } catch (err: any) {
-  //     setMessage({ type: 'error', text: err.message || 'Failed to download file' });
-  //   }
-  // };
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+    } catch (err: any) {
+      setMessage({ type: 'error', text: err.message || 'Failed to download file' });
+    }
+  };
 
   const handleAnalyze = async (fileId: string) => {
     try {
@@ -185,44 +185,72 @@ function CreatedExcelFilesComponent() {
     }
   };
 
-  // COMMENTED OUT - Merge excel functionality (not useable for now)
-  // const handleMerge = async () => {
-  //   if (selectedFiles.length < 2) {
-  //     setMessage({ type: 'error', text: 'Please select at least 2 files to merge' });
-  //     return;
-  //   }
+  const handleMerge = async () => {
+    if (selectedFiles.length < 2) {
+      setMessage({ type: 'error', text: 'Please select at least 2 files to merge' });
+      return;
+    }
 
-  //   if (!confirm(`Are you sure you want to merge ${selectedFiles.length} files?`)) {
-  //     return;
-  //   }
+    // Check if all selected files have the same labour type (warning, not error)
+    const selectedFileObjects = files.filter(f => selectedFiles.includes(f._id));
+    const labourTypes = Array.from(new Set(selectedFileObjects.map(f => f.labourType)));
+    if (labourTypes.length > 1) {
+      if (!confirm(`Warning: Selected files have different labour types (${labourTypes.join(', ')}). They will still be merged. Continue?`)) {
+        return;
+      }
+    }
 
-  //   setMerging(true);
-  //   setMessage(null);
+    if (!confirm(`Are you sure you want to merge ${selectedFiles.length} files?`)) {
+      return;
+    }
 
-  //   try {
-  //     const response = await fetch('/api/admin/created-excel-files/merge', {
-  //       method: 'POST',
-  //       headers: {
-  //         'Authorization': `Bearer ${token}`,
-  //         'Content-Type': 'application/json',
-  //       },
-  //       body: JSON.stringify({ fileIds: selectedFiles }),
-  //     });
+    setMerging(true);
+    setMessage(null);
 
-  //     const result = await response.json();
-  //     if (result.success) {
-  //       setMessage({ type: 'success', text: result.message || 'Successfully merged files' });
-  //       setSelectedFiles([]);
-  //       fetchFiles();
-  //     } else {
-  //       setMessage({ type: 'error', text: result.error || 'Failed to merge files' });
-  //     }
-  //   } catch (err: any) {
-  //     setMessage({ type: 'error', text: err.message || 'Failed to merge files' });
-  //   } finally {
-  //     setMerging(false);
-  //   }
-  // };
+    try {
+      const response = await fetch('/api/admin/created-excel-files/merge', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ fileIds: selectedFiles }),
+      });
+
+      const result = await response.json();
+      if (result.success) {
+        let successMessage = result.message || 'Successfully merged files';
+        
+        // Store attendance stats for display
+        if (result.data?.attendanceAnalysis) {
+          setMergeAttendanceStats(result.data.attendanceAnalysis);
+          const stats = result.data.attendanceAnalysis;
+          successMessage = `Successfully merged ${selectedFiles.length} files into one file with ${result.data.mergedFile.rowCount} rows.`;
+        } else {
+          setMergeAttendanceStats(null);
+        }
+        
+        setMessage({ type: 'success', text: successMessage });
+        setSelectedFiles([]);
+        fetchFiles();
+        
+        // Auto-analyze the merged file if attendance data exists
+        if (result.data?.mergedFile?.id && result.data?.attendanceAnalysis) {
+          setTimeout(() => {
+            handleAnalyze(result.data.mergedFile.id);
+          }, 1000);
+        }
+      } else {
+        setMessage({ type: 'error', text: result.error || 'Failed to merge files' });
+        setMergeAttendanceStats(null);
+      }
+    } catch (err: any) {
+      console.error('Merge error:', err);
+      setMessage({ type: 'error', text: err.message || 'Failed to merge files. Please check the console for details.' });
+    } finally {
+      setMerging(false);
+    }
+  };
 
   const handleDeleteSelected = async () => {
     if (selectedFiles.length === 0) {
@@ -238,25 +266,42 @@ function CreatedExcelFilesComponent() {
     setMessage(null);
 
     try {
-      const deletePromises = selectedFiles.map(fileId =>
-        fetch(`/api/admin/created-excel-files/${fileId}`, {
+      const deletePromises = selectedFiles.map(async (fileId) => {
+        const response = await fetch(`/api/admin/created-excel-files/${fileId}`, {
           method: 'DELETE',
           headers: {
             'Authorization': `Bearer ${token}`,
           },
-        })
-      );
+        });
+        return { fileId, response };
+      });
 
       const results = await Promise.all(deletePromises);
-      const jsonResults = await Promise.all(results.map(r => r.json()));
+      const jsonResults = await Promise.all(
+        results.map(async ({ fileId, response }) => ({
+          fileId,
+          result: await response.json(),
+          status: response.status,
+        }))
+      );
       
-      const failed = jsonResults.filter(r => !r.success);
+      const failed = jsonResults.filter(r => !r.result.success);
+      const succeeded = jsonResults.filter(r => r.result.success);
+      
       if (failed.length === 0) {
         setMessage({ type: 'success', text: `Successfully deleted ${selectedFiles.length} file(s)` });
         setSelectedFiles([]);
         fetchFiles();
       } else {
-        setMessage({ type: 'error', text: `Failed to delete ${failed.length} file(s)` });
+        const errorMessages = failed.map(f => f.result.error || 'Unknown error').join('; ');
+        setMessage({ 
+          type: 'error', 
+          text: `Failed to delete ${failed.length} file(s). ${succeeded.length} file(s) deleted successfully. Errors: ${errorMessages}` 
+        });
+        // Refresh to update the list
+        fetchFiles();
+        // Remove successfully deleted files from selection
+        setSelectedFiles(failed.map(f => f.fileId));
       }
     } catch (err: any) {
       setMessage({ type: 'error', text: err.message || 'Failed to delete files' });
@@ -292,14 +337,13 @@ function CreatedExcelFilesComponent() {
         <div className="flex justify-between items-center mb-6">
           <h1 className="text-3xl font-bold">Created Excel Files</h1>
           <div className="flex gap-2">
-            {/* COMMENTED OUT - Merge excel button (not useable for now) */}
-            {/* <button
+            <button
               onClick={handleMerge}
               disabled={merging || selectedFiles.length < 2}
               className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50"
             >
               {merging ? 'Merging...' : `Merge Selected (${selectedFiles.length})`}
-            </button> */}
+            </button>
             <button
               onClick={handleDeleteSelected}
               disabled={deleting || selectedFiles.length === 0}
@@ -326,10 +370,68 @@ function CreatedExcelFilesComponent() {
         </div>
 
         {message && (
-          <div className={`mb-4 p-3 rounded ${
-            message.type === 'success' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
+          <div className={`mb-4 p-4 rounded-lg ${
+            message.type === 'success' ? 'bg-green-50 border border-green-200 text-green-800' : 'bg-red-50 border border-red-200 text-red-800'
           }`}>
-            {message.text}
+            <div className="font-semibold mb-2">{message.text}</div>
+            {mergeAttendanceStats && message.type === 'success' && (
+              <div className="mt-4 pt-4 border-t border-green-300">
+                <h4 className="font-semibold mb-3 text-green-900">📊 Merged File Attendance Analysis</h4>
+                <div className="grid grid-cols-4 gap-4">
+                  <div className="bg-green-100 p-4 rounded-lg border border-green-300">
+                    <div className="text-3xl font-bold text-green-700">
+                      {mergeAttendanceStats.present}
+                    </div>
+                    <div className="text-sm text-green-600 font-medium">Present</div>
+                    {mergeAttendanceStats.total > 0 && (
+                      <div className="text-xs text-green-500 mt-1">
+                        {((mergeAttendanceStats.present / mergeAttendanceStats.total) * 100).toFixed(1)}%
+                      </div>
+                    )}
+                  </div>
+                  <div className="bg-red-100 p-4 rounded-lg border border-red-300">
+                    <div className="text-3xl font-bold text-red-700">
+                      {mergeAttendanceStats.absent}
+                    </div>
+                    <div className="text-sm text-red-600 font-medium">Absent</div>
+                    {mergeAttendanceStats.total > 0 && (
+                      <div className="text-xs text-red-500 mt-1">
+                        {((mergeAttendanceStats.absent / mergeAttendanceStats.total) * 100).toFixed(1)}%
+                      </div>
+                    )}
+                  </div>
+                  <div className="bg-yellow-100 p-4 rounded-lg border border-yellow-300">
+                    <div className="text-3xl font-bold text-yellow-700">
+                      {mergeAttendanceStats.other}
+                    </div>
+                    <div className="text-sm text-yellow-600 font-medium">Other</div>
+                    {mergeAttendanceStats.total > 0 && (
+                      <div className="text-xs text-yellow-500 mt-1">
+                        {((mergeAttendanceStats.other / mergeAttendanceStats.total) * 100).toFixed(1)}%
+                      </div>
+                    )}
+                  </div>
+                  <div className="bg-gray-100 p-4 rounded-lg border border-gray-300">
+                    <div className="text-3xl font-bold text-gray-700">
+                      {mergeAttendanceStats.total}
+                    </div>
+                    <div className="text-sm text-gray-600 font-medium">Total</div>
+                  </div>
+                </div>
+                {mergeAttendanceStats.otherValues && Object.keys(mergeAttendanceStats.otherValues).length > 0 && (
+                  <div className="mt-4">
+                    <p className="text-sm font-medium text-green-800 mb-2">Other Attendance Values:</p>
+                    <div className="flex flex-wrap gap-2">
+                      {Object.entries(mergeAttendanceStats.otherValues).map(([value, count]) => (
+                        <span key={value} className="px-3 py-1 bg-white border border-green-200 rounded text-sm text-green-700">
+                          {value}: {count}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 
@@ -413,13 +515,12 @@ function CreatedExcelFilesComponent() {
                         >
                           {analyzingFileId === file._id ? 'Analyzing...' : 'Analyze'}
                         </button>
-                        {/* COMMENTED OUT - Download excel button (not useable for now) */}
-                        {/* <button
+                        <button
                           onClick={() => handleDownload(file._id, file.originalFilename)}
                           className="text-blue-600 hover:text-blue-800"
                         >
                           Download
-                        </button> */}
+                        </button>
                         <button
                           onClick={() => handleDelete(file._id)}
                           disabled={deleting}

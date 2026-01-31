@@ -27,8 +27,10 @@ async function handleGetMyFormats(req: AuthenticatedRequest) {
     // 1. To 'all' (assignedToType === 'all')
     // 2. To specific users (assignedToType === 'user' and userId in assignedTo)
     // 3. To specific employees (assignedToType === 'employee' and userId in assignedTo)
+    // Note: Formats with assignedToType === 'none' are NOT included
     const query: any = {
       active: true,
+      assignedToType: { $ne: 'none' }, // Exclude 'none' type formats
       $or: [
         { assignedToType: 'all' },
       ],

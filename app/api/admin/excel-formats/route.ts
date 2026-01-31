@@ -52,6 +52,7 @@ async function handleCreateFormat(req: AuthenticatedRequest) {
       name: col.name,
       type: col.type || 'text',
       required: col.required || false,
+      editable: col.editable !== undefined ? col.editable : true, // Default to editable
       validation: col.validation || {},
       order: col.order !== undefined ? col.order : index,
     }));
@@ -82,6 +83,10 @@ async function handleCreateFormat(req: AuthenticatedRequest) {
 
 export const GET = withAdmin(handleGetFormats);
 export const POST = withAdmin(handleCreateFormat);
+
+
+
+
 
 
 

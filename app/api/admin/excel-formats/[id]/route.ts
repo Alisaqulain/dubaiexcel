@@ -80,6 +80,7 @@ async function handleUpdateFormat(
         name: col.name,
         type: col.type || 'text',
         required: col.required || false,
+        editable: col.editable !== undefined ? col.editable : true, // Default to editable
         validation: col.validation || {},
         order: col.order !== undefined ? col.order : index,
       }));

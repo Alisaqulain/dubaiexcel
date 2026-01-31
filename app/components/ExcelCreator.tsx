@@ -12,6 +12,7 @@ interface Column {
   name: string;
   type: 'text' | 'number' | 'date' | 'email' | 'dropdown';
   required: boolean;
+  editable?: boolean; // true = editable by users, false = read-only
   validation?: {
     min?: number;
     max?: number;
@@ -30,20 +31,32 @@ interface ExcelFormat {
 interface ExcelCreatorProps {
   labourType: 'OUR_LABOUR' | 'SUPPLY_LABOUR' | 'SUBCONTRACTOR';
   onFileCreated?: (file: File) => void;
+  onSaveAndClose?: () => void; // Callback when Save and Close is clicked
+  onSaveSuccess?: () => void; // Callback when save is successful (to refresh saved files list)
   useCustomFormat?: boolean; // If true, use assigned format instead of default
   formatId?: string; // Specific format ID to use (if provided, will fetch that format)
+  initialData?: ExcelRow[]; // Initial data for editing existing file
+  editingFileId?: string; // ID of file being edited
 }
 
-export default function ExcelCreator({ labourType, onFileCreated, useCustomFormat = false, formatId }: ExcelCreatorProps) {
+export default function ExcelCreator({ labourType, onFileCreated, onSaveAndClose, onSaveSuccess, useCustomFormat = false, formatId, initialData, editingFileId }: ExcelCreatorProps) {
   const { token } = useAuth();
-  const [rows, setRows] = useState<ExcelRow[]>([]);
+  const [rows, setRows] = useState<ExcelRow[]>(initialData || []);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [showBulkOptions, setShowBulkOptions] = useState(false);
   const [bulkRowCount, setBulkRowCount] = useState(10);
   const [pasteData, setPasteData] = useState('');
   const [customFormat, setCustomFormat] = useState<ExcelFormat | null>(null);
+  const [templateRows, setTemplateRows] = useState<Record<string, any>[]>([]); // Store template rows for read-only column validation
   const [loadingFormat, setLoadingFormat] = useState(false);
   const [saving, setSaving] = useState(false);
+  // Track current editing file ID - clears after save so next save creates new file
+  const [currentEditingFileId, setCurrentEditingFileId] = useState<string | undefined>(editingFileId);
+  
+  // Update currentEditingFileId when editingFileId prop changes
+  useEffect(() => {
+    setCurrentEditingFileId(editingFileId);
+  }, [editingFileId]);
 
   // Define default columns based on labour type
   const getDefaultColumns = (): Column[] => {
@@ -94,6 +107,18 @@ export default function ExcelCreator({ labourType, onFileCreated, useCustomForma
         .then(result => {
           if (result.success && result.data) {
             setCustomFormat(result.data);
+            
+            // Store template rows for read-only column validation
+            if (result.data.templateRows && result.data.templateRows.length > 0) {
+              setTemplateRows(result.data.templateRows);
+              // If no initial data, populate with template rows
+              if (!initialData || initialData.length === 0) {
+                setRows(result.data.templateRows);
+              }
+            } else {
+              setTemplateRows([]);
+            }
+            
             setMessage(null);
           } else {
             // No format assigned - show error
@@ -134,8 +159,14 @@ export default function ExcelCreator({ labourType, onFileCreated, useCustomForma
 
   const addRow = () => {
     const newRow: ExcelRow = {};
+    const rowIndex = rows.length;
     columns.forEach(col => {
-      newRow[col.name] = '';
+      // If column is read-only and template data exists, use template value
+      if (col.editable === false && templateRows.length > rowIndex && templateRows[rowIndex][col.name]) {
+        newRow[col.name] = templateRows[rowIndex][col.name];
+      } else {
+        newRow[col.name] = '';
+      }
     });
     setRows([...rows, newRow]);
   };
@@ -144,8 +175,15 @@ export default function ExcelCreator({ labourType, onFileCreated, useCustomForma
     const newRows: ExcelRow[] = [];
     for (let i = 0; i < bulkRowCount; i++) {
       const newRow: ExcelRow = {};
+      const rowIndex = rows.length + i;
       columnNames.forEach(colName => {
-        newRow[colName] = '';
+        const col = columns.find(c => c.name === colName);
+        // If column is read-only and template data exists, use template value
+        if (col && col.editable === false && templateRows.length > rowIndex && templateRows[rowIndex][colName]) {
+          newRow[colName] = templateRows[rowIndex][colName];
+        } else {
+          newRow[colName] = '';
+        }
       });
       newRows.push(newRow);
     }
@@ -161,6 +199,9 @@ export default function ExcelCreator({ labourType, onFileCreated, useCustomForma
     }
 
     try {
+      const currentColumns = getColumns();
+      const readOnlyColumns = currentColumns.filter(col => col.editable === false).map(col => col.name);
+      
       // Parse pasted data (tab-separated or comma-separated)
       const lines = pasteData.split('\n').filter(line => line.trim());
       const newRows: ExcelRow[] = [];
@@ -171,7 +212,22 @@ export default function ExcelCreator({ labourType, onFileCreated, useCustomForma
         const newRow: ExcelRow = {};
         
         columnNames.forEach((colName, colIndex) => {
-          newRow[colName] = values[colIndex]?.trim() || '';
+          // If column is read-only, preserve value from template or existing row
+          if (readOnlyColumns.includes(colName)) {
+            // Try to get from template row if available
+            const templateRowIndex = rows.length + lineIndex;
+            if (templateRows.length > templateRowIndex && templateRows[templateRowIndex][colName]) {
+              newRow[colName] = templateRows[templateRowIndex][colName];
+            } else if (rows.length > 0 && rows[rows.length - 1][colName]) {
+              // Or use value from last row
+              newRow[colName] = rows[rows.length - 1][colName];
+            } else {
+              newRow[colName] = '';
+            }
+          } else {
+            // Editable column - use pasted value
+            newRow[colName] = values[colIndex]?.trim() || '';
+          }
         });
         
         newRows.push(newRow);
@@ -181,7 +237,7 @@ export default function ExcelCreator({ labourType, onFileCreated, useCustomForma
         setRows([...rows, ...newRows]);
         setPasteData('');
         setShowBulkOptions(false);
-        setMessage({ type: 'success', text: `Imported ${newRows.length} rows from pasted data!` });
+        setMessage({ type: 'success', text: `Imported ${newRows.length} rows from pasted data! Read-only columns preserved.` });
       } else {
         setMessage({ type: 'error', text: 'No valid data found. Please check your format.' });
       }
@@ -244,17 +300,33 @@ export default function ExcelCreator({ labourType, onFileCreated, useCustomForma
           }
         });
 
+        // Get read-only columns
+        const currentColumns = getColumns();
+        const readOnlyColumns = currentColumns.filter(col => col.editable === false).map(col => col.name);
+        
         // Map imported data to our columns using the mapping
         const newRows: ExcelRow[] = allData.slice(1)
           .filter(row => row && row.length > 0 && row.some((cell: any) => cell !== '' && cell !== null && cell !== undefined)) // Filter empty rows
-          .map((row: any[]) => {
+          .map((row: any[], rowIndex) => {
             const newRow: ExcelRow = {};
             columnNames.forEach(colName => {
-              const excelIndex = columnMapping[colName];
-              if (excelIndex !== undefined && excelIndex !== -1 && row[excelIndex] !== undefined && row[excelIndex] !== null && row[excelIndex] !== '') {
-                newRow[colName] = String(row[excelIndex]).trim();
+              // If column is read-only, preserve value from template
+              if (readOnlyColumns.includes(colName)) {
+                // Try to get from template row if available
+                if (templateRows.length > rowIndex && templateRows[rowIndex][colName]) {
+                  newRow[colName] = templateRows[rowIndex][colName];
+                } else {
+                  // Keep empty or use existing value
+                  newRow[colName] = '';
+                }
               } else {
-                newRow[colName] = '';
+                // Editable column - use imported value
+                const excelIndex = columnMapping[colName];
+                if (excelIndex !== undefined && excelIndex !== -1 && row[excelIndex] !== undefined && row[excelIndex] !== null && row[excelIndex] !== '') {
+                  newRow[colName] = String(row[excelIndex]).trim();
+                } else {
+                  newRow[colName] = '';
+                }
               }
             });
             return newRow;
@@ -265,9 +337,39 @@ export default function ExcelCreator({ labourType, onFileCreated, useCustomForma
           return;
         }
 
+        // Validate that read-only columns weren't changed
+        const readOnlyErrors: string[] = [];
+        newRows.forEach((newRow, rowIndex) => {
+          readOnlyColumns.forEach(colName => {
+            if (templateRows.length > rowIndex && templateRows[rowIndex][colName]) {
+              const templateValue = String(templateRows[rowIndex][colName] || '').trim();
+              const importedValue = String(newRow[colName] || '').trim();
+              // Check if user tried to change read-only column (if it exists in Excel)
+              const excelIndex = columnMapping[colName];
+              if (excelIndex !== undefined && excelIndex !== -1) {
+                const excelValue = allData.slice(1)[rowIndex]?.[excelIndex];
+                if (excelValue !== undefined && excelValue !== null && String(excelValue).trim() !== '') {
+                  const userValue = String(excelValue).trim();
+                  if (userValue !== templateValue && templateValue !== '') {
+                    readOnlyErrors.push(`Row ${rowIndex + 1}: Column "${colName}" is read-only and cannot be changed. Value restored from template.`);
+                  }
+                }
+              }
+            }
+          });
+        });
+
         setRows([...rows, ...newRows]);
         setShowBulkOptions(false);
-        setMessage({ type: 'success', text: `Imported ${newRows.length} rows from ${file.name}!` });
+        
+        if (readOnlyErrors.length > 0) {
+          setMessage({ 
+            type: 'error', 
+            text: `Imported ${newRows.length} rows from ${file.name}, but read-only columns were restored:\n${readOnlyErrors.slice(0, 5).join('\n')}${readOnlyErrors.length > 5 ? `\n...and ${readOnlyErrors.length - 5} more` : ''}` 
+          });
+        } else {
+          setMessage({ type: 'success', text: `Imported ${newRows.length} rows from ${file.name}!` });
+        }
         
         // Reset file input
         if (e.target) {
@@ -285,6 +387,14 @@ export default function ExcelCreator({ labourType, onFileCreated, useCustomForma
   };
 
   const updateCell = (rowIndex: number, column: string, value: string | number) => {
+    // Check if column is read-only
+    const currentColumns = getColumns();
+    const col = currentColumns.find(c => c.name === column);
+    if (col && col.editable === false) {
+      setMessage({ type: 'error', text: `Column "${column}" is read-only and cannot be edited` });
+      return;
+    }
+    
     const newRows = [...rows];
     newRows[rowIndex][column] = value;
     setRows(newRows);
@@ -383,8 +493,11 @@ export default function ExcelCreator({ labourType, onFileCreated, useCustomForma
         type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' 
       });
       
-      // Create file
-      const filename = `employee_data_${labourType.toLowerCase()}_${Date.now()}.xlsx`;
+      // Create file with date and time in filename
+      const now = new Date();
+      const dateStr = now.toISOString().split('T')[0]; // YYYY-MM-DD
+      const timeStr = now.toTimeString().split(' ')[0].replace(/:/g, '-'); // HH-MM-SS
+      const filename = `employee_data_${labourType.toLowerCase()}_${dateStr}_${timeStr}.xlsx`;
       const file = new File([blob], filename, { 
         type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' 
       });
@@ -394,9 +507,12 @@ export default function ExcelCreator({ labourType, onFileCreated, useCustomForma
       formData.append('file', file);
       formData.append('labourType', labourType);
       formData.append('rowCount', rows.length.toString());
+      if (currentEditingFileId) {
+        formData.append('fileId', currentEditingFileId); // For updating existing file
+      }
 
       const response = await fetch('/api/employee/save-excel', {
-        method: 'POST',
+        method: currentEditingFileId ? 'PUT' : 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
         },
@@ -406,11 +522,31 @@ export default function ExcelCreator({ labourType, onFileCreated, useCustomForma
       const result = await response.json();
 
       if (result.success) {
-        setMessage({ type: 'success', text: 'Excel file saved successfully! Super admin can now view it.' });
+        // Clear currentEditingFileId after successful save so next save creates a new file
+        const wasEditing = !!currentEditingFileId;
+        setCurrentEditingFileId(undefined);
+        
+        // Save row count before clearing
+        const savedRowCount = rows.length;
+        
+        // Clear all rows after successful save
+        setRows([]);
+        
+        setMessage({ 
+          type: 'success', 
+          text: wasEditing 
+            ? `Excel file updated successfully! (${savedRowCount} rows) File saved and form cleared. You can now add new data.` 
+            : `Excel file saved successfully! (${savedRowCount} rows) File saved and form cleared. You can now add new data.` 
+        });
         
         // Also call the onFileCreated callback if provided
         if (onFileCreated) {
           onFileCreated(file);
+        }
+        
+        // Call onSaveSuccess to refresh saved files list
+        if (onSaveSuccess) {
+          onSaveSuccess();
         }
       } else {
         // Handle validation errors with detailed message
@@ -571,56 +707,78 @@ export default function ExcelCreator({ labourType, onFileCreated, useCustomForma
         </div>
       ) : (
         <>
-          <div className="overflow-x-auto mb-4">
-            <table className="min-w-full divide-y divide-gray-200 border">
-              <thead className="bg-gray-50">
+          <div className="overflow-x-auto mb-4 shadow-sm rounded-lg border border-gray-200 bg-white">
+            <table className="min-w-full divide-y divide-gray-200" style={{ tableLayout: 'auto' }}>
+              <thead className="bg-gray-50 sticky top-0 z-10">
                 <tr>
-                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">#</th>
-                  {columns.map((col) => (
-                    <th key={col.name} className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">
-                      {col.name}
-                    </th>
-                  ))}
-                  <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider whitespace-nowrap min-w-[50px]">#</th>
+                  {columns.map((col) => {
+                    // Calculate minimum width based on column name length - more generous sizing
+                    const minWidth = Math.max(180, Math.min(col.name.length * 12 + 60, 300));
+                    return (
+                      <th 
+                        key={col.name} 
+                        className="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider"
+                        style={{ minWidth: `${minWidth}px`, maxWidth: '400px' }}
+                      >
+                        <div className="break-words">{col.name}</div>
+                      </th>
+                    );
+                  })}
+                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider whitespace-nowrap min-w-[100px]">Actions</th>
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
                 {rows.map((row, rowIndex) => (
-                  <tr key={rowIndex} className="hover:bg-gray-50">
-                    <td className="px-3 py-2 text-sm text-gray-500">{rowIndex + 1}</td>
-                    {columns.map((col) => (
-                      <td key={col.name} className="px-3 py-2">
-                        {col.type === 'dropdown' && col.validation?.options ? (
-                          <select
-                            value={row[col.name] || ''}
-                            onChange={(e) => updateCell(rowIndex, col.name, e.target.value)}
-                            className="w-full px-2 py-1 border rounded text-sm"
-                            required={col.required}
-                          >
-                            <option value="">Select...</option>
-                            {col.validation.options.map(opt => (
-                              <option key={opt} value={opt}>{opt}</option>
-                            ))}
-                          </select>
-                        ) : (
-                          <input
-                            type={col.type === 'number' ? 'number' : col.type === 'date' ? 'date' : col.type === 'email' ? 'email' : 'text'}
-                            value={row[col.name] || ''}
-                            onChange={(e) => updateCell(rowIndex, col.name, e.target.value)}
-                            className="w-full px-2 py-1 border rounded text-sm"
-                            placeholder={`Enter ${col.name}${col.type === 'number' && col.validation ? ` (${col.validation.min || 0}-${col.validation.max || '∞'})` : ''}`}
-                            required={col.required}
-                            min={col.type === 'number' ? col.validation?.min : undefined}
-                            max={col.type === 'number' ? col.validation?.max : undefined}
-                          />
-                        )}
-                      </td>
-                    ))}
-                    <td className="px-3 py-2">
+                  <tr key={rowIndex} className="hover:bg-gray-50 transition-colors">
+                    <td className="px-4 py-3 text-sm font-medium text-gray-500 whitespace-nowrap">{rowIndex + 1}</td>
+                    {columns.map((col) => {
+                      const isReadOnly = col.editable === false;
+                      const minWidth = Math.max(180, Math.min(col.name.length * 12 + 60, 300));
+                      return (
+                        <td key={col.name} className={`px-4 py-3 ${isReadOnly ? 'bg-gray-50' : ''}`} style={{ minWidth: `${minWidth}px`, maxWidth: '400px' }}>
+                          {col.type === 'dropdown' && col.validation?.options ? (
+                            <select
+                              value={row[col.name] || ''}
+                              onChange={(e) => updateCell(rowIndex, col.name, e.target.value)}
+                              className={`w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all ${isReadOnly ? 'bg-gray-200 cursor-not-allowed' : 'bg-white hover:border-gray-400'}`}
+                              required={col.required}
+                              disabled={isReadOnly}
+                              title={isReadOnly ? 'This column is read-only' : ''}
+                              style={{ minWidth: '120px' }}
+                            >
+                              <option value="">Select...</option>
+                              {col.validation.options.map(opt => (
+                                <option key={opt} value={opt}>{opt}</option>
+                              ))}
+                            </select>
+                          ) : (
+                            <input
+                              type={col.type === 'number' ? 'number' : col.type === 'date' ? 'date' : col.type === 'email' ? 'email' : 'text'}
+                              value={row[col.name] || ''}
+                              onChange={(e) => updateCell(rowIndex, col.name, e.target.value)}
+                              className={`w-full px-3 py-2.5 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all ${isReadOnly ? 'bg-gray-200 cursor-not-allowed' : 'bg-white hover:border-gray-400'}`}
+                              placeholder={`Enter ${col.name}${col.type === 'number' && col.validation ? ` (${col.validation.min || 0}-${col.validation.max || '∞'})` : ''}`}
+                              required={col.required}
+                              disabled={isReadOnly}
+                              readOnly={isReadOnly}
+                              title={isReadOnly ? 'This column is read-only' : ''}
+                              min={col.type === 'number' ? col.validation?.min : undefined}
+                              max={col.type === 'number' ? col.validation?.max : undefined}
+                              style={{ 
+                                minWidth: col.type === 'text' || col.type === 'email' ? '180px' : col.type === 'date' ? '160px' : '120px',
+                                fontSize: '14px'
+                              }}
+                            />
+                          )}
+                        </td>
+                      );
+                    })}
+                    <td className="px-4 py-3 whitespace-nowrap">
                       <button
                         type="button"
                         onClick={() => removeRow(rowIndex)}
-                        className="text-red-600 hover:text-red-900 text-sm"
+                        className="px-3 py-1.5 text-sm font-medium text-red-600 hover:text-red-800 hover:bg-red-50 rounded-md transition-colors"
                       >
                         Remove
                       </button>
@@ -646,6 +804,75 @@ export default function ExcelCreator({ labourType, onFileCreated, useCustomForma
             >
               {saving ? '💾 Saving...' : '💾 Save Excel'}
             </button>
+            {onSaveAndClose && (
+              <button
+                type="button"
+                onClick={async () => {
+                  if (rows.length === 0) {
+                    setMessage({ type: 'error', text: 'Please add at least one row of data' });
+                    return;
+                  }
+                  
+                  // Save first, then close
+                  try {
+                    setSaving(true);
+                    // Create workbook
+                    const workbook = XLSX.utils.book_new();
+                    const worksheet = XLSX.utils.json_to_sheet(rows);
+                    const colWidths = columnNames.map(() => ({ wch: 20 }));
+                    worksheet['!cols'] = colWidths;
+                    XLSX.utils.book_append_sheet(workbook, worksheet, 'Data');
+                    const excelBuffer = XLSX.write(workbook, { type: 'array', bookType: 'xlsx' });
+                    const blob = new Blob([excelBuffer], { 
+                        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' 
+                    });
+                    const now = new Date();
+                    const dateStr = now.toISOString().split('T')[0];
+                    const timeStr = now.toTimeString().split(' ')[0].replace(/:/g, '-');
+                    const filename = `employee_data_${labourType.toLowerCase()}_${dateStr}_${timeStr}.xlsx`;
+                    const file = new File([blob], filename, { 
+                        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' 
+                    });
+                    const formData = new FormData();
+                    formData.append('file', file);
+                    formData.append('labourType', labourType);
+                    formData.append('rowCount', rows.length.toString());
+                    if (currentEditingFileId) {
+                        formData.append('fileId', currentEditingFileId);
+                    }
+                    const response = await fetch('/api/employee/save-excel', {
+                        method: currentEditingFileId ? 'PUT' : 'POST',
+                        headers: { 'Authorization': `Bearer ${token}` },
+                        body: formData,
+                    });
+                    const result = await response.json();
+                    if (result.success) {
+                        const wasEditing = !!currentEditingFileId;
+                        setCurrentEditingFileId(undefined); // Clear so next save creates new file
+                        const savedRowCount = rows.length;
+                        setRows([]); // Clear rows after save
+                        setMessage({ type: 'success', text: wasEditing ? 'File updated successfully!' : 'File saved successfully!' });
+                        if (onFileCreated) onFileCreated(file);
+                        if (onSaveSuccess) onSaveSuccess(); // Refresh saved files list
+                        // Close after successful save
+                        setTimeout(() => {
+                            if (onSaveAndClose) onSaveAndClose();
+                        }, 300);
+                    } else {
+                        setMessage({ type: 'error', text: result.error || 'Failed to save file' });
+                    }
+                  } catch (err: any) {
+                    setMessage({ type: 'error', text: err.message || 'Failed to save file' });
+                  } finally {
+                    setSaving(false);
+                  }
+                }}
+                disabled={saving || !token || rows.length === 0}
+                className="px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 font-semibold disabled:bg-gray-400 disabled:cursor-not-allowed"
+              >
+                {saving ? '💾 Saving...' : '💾 Save and Close'}
+              </button>
+            )}
             <button
               type="button"
               onClick={createExcel}

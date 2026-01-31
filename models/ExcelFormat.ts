@@ -7,6 +7,7 @@ export interface IExcelFormat extends Document {
     name: string;
     type: 'text' | 'number' | 'date' | 'email' | 'dropdown';
     required: boolean;
+    editable: boolean; // true = editable by users, false = locked (admin only)
     validation?: {
       min?: number;
       max?: number;
@@ -16,7 +17,7 @@ export interface IExcelFormat extends Document {
     order: number;
   }>;
   assignedTo: mongoose.Types.ObjectId[]; // Employee IDs or User IDs
-  assignedToType: 'employee' | 'user' | 'all';
+  assignedToType: 'employee' | 'user' | 'all' | 'none';
   createdBy: mongoose.Types.ObjectId;
   active: boolean;
   createdAt?: Date;
@@ -26,27 +27,28 @@ export interface IExcelFormat extends Document {
 const ExcelFormatSchema = new Schema<IExcelFormat>({
   name: { type: String, required: true },
   description: { type: String },
-  columns: [{
-    name: { type: String, required: true },
-    type: { 
-      type: String, 
-      enum: ['text', 'number', 'date', 'email', 'dropdown'],
-      required: true,
-      default: 'text'
-    },
-    required: { type: Boolean, default: false },
-    validation: {
-      min: { type: Number },
-      max: { type: Number },
-      pattern: { type: String },
-      options: [{ type: String }], // For dropdown
-    },
-    order: { type: Number, required: true },
-  }],
+    columns: [{
+      name: { type: String, required: true },
+      type: { 
+        type: String, 
+        enum: ['text', 'number', 'date', 'email', 'dropdown'],
+        required: true,
+        default: 'text'
+      },
+      required: { type: Boolean, default: false },
+      editable: { type: Boolean, default: true }, // Default to editable
+      validation: {
+        min: { type: Number },
+        max: { type: Number },
+        pattern: { type: String },
+        options: [{ type: String }], // For dropdown
+      },
+      order: { type: Number, required: true },
+    }],
   assignedTo: [{ type: Schema.Types.ObjectId, refPath: 'assignedToType' }],
   assignedToType: { 
     type: String, 
-    enum: ['employee', 'user', 'all'],
+    enum: ['employee', 'user', 'all', 'none'],
     default: 'all'
   },
   createdBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
@@ -61,6 +63,9 @@ ExcelFormatSchema.index({ createdBy: 1 });
 
 const ExcelFormat = mongoose.models.ExcelFormat || mongoose.model<IExcelFormat>('ExcelFormat', ExcelFormatSchema);
 export default ExcelFormat;
+
+
+
 
 
 

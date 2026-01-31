@@ -10,6 +10,7 @@ interface Column {
   name: string;
   type: 'text' | 'number' | 'date' | 'email' | 'dropdown';
   required: boolean;
+  editable: boolean; // true = editable by users, false = read-only
   validation?: {
     min?: number;
     max?: number;
@@ -62,6 +63,7 @@ function ExcelFormatsComponent() {
   const [uploadingFormat, setUploadingFormat] = useState<string | null>(null);
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploadResult, setUploadResult] = useState<any>(null);
+  const [importedRowData, setImportedRowData] = useState<Record<string, any>[]>([]); // Store imported row data
   const [formData, setFormData] = useState({
     name: '',
     description: '',
@@ -130,6 +132,7 @@ function ExcelFormatsComponent() {
         name: '',
         type: 'text',
         required: false,
+        editable: true, // Default to editable
         order: formData.columns.length,
       }],
     });
@@ -235,56 +238,321 @@ function ExcelFormatsComponent() {
       reader.onload = (event) => {
         try {
           const data = new Uint8Array(event.target?.result as ArrayBuffer);
-          const workbook = XLSX.read(data, { type: 'array' });
+          const workbook = XLSX.read(data, { type: 'array', cellDates: false, cellNF: false, cellText: false });
           const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
-          const jsonData = XLSX.utils.sheet_to_json(firstSheet);
-
-          if (jsonData.length === 0) {
-            alert('Excel file is empty');
+          
+          if (!firstSheet || !firstSheet['!ref']) {
+            alert('Excel file appears to be empty or invalid');
             return;
           }
 
-          // Parse format from Excel
-          // First row should have format name and description
-          const firstRow: any = jsonData[0];
-          const formatName = firstRow['Format Name'] || firstRow['format name'] || 'Imported Format';
-          const formatDescription = firstRow['Description'] || firstRow['description'] || '';
+          let headers: string[] = [];
 
-          // Extract columns from all rows
-          const columns: Column[] = [];
-          const seenColumns = new Set<string>();
-
-          jsonData.forEach((row: any, index: number) => {
-            const colName = row['Column Name'] || row['column name'] || row['Column'] || row['column'];
-            if (colName && !seenColumns.has(colName)) {
-              seenColumns.add(colName);
-              const colType = (row['Column Type'] || row['column type'] || row['Type'] || 'text').toLowerCase();
-              const required = (row['Required'] || row['required'] || 'No').toString().toLowerCase() === 'yes';
-              const min = row['Min Value'] || row['min value'] || row['Min'] || undefined;
-              const max = row['Max Value'] || row['max value'] || row['Max'] || undefined;
-              const options = row['Dropdown Options'] || row['dropdown options'] || row['Options'] || '';
-
-              columns.push({
-                name: colName,
-                type: (colType === 'number' ? 'number' : 
-                       colType === 'date' ? 'date' : 
-                       colType === 'email' ? 'email' : 
-                       colType === 'dropdown' ? 'dropdown' : 'text') as any,
-                required,
-                validation: {
-                  ...(min && { min: parseInt(min) }),
-                  ...(max && { max: parseInt(max) }),
-                  ...(options && { options: options.split(',').map((s: string) => s.trim()).filter((s: string) => s) }),
-                },
-                order: columns.length,
-              });
+          // Method 1: Read first row directly from worksheet cells (most reliable)
+          try {
+            const range = XLSX.utils.decode_range(firstSheet['!ref'] || 'A1:Z1');
+            const rowHeaders: string[] = [];
+            
+            // Read first row (row 0) - extend range to cover more columns if needed
+            const maxCol = Math.max(range.e.c, 50); // Check up to column 50 (AZ)
+            
+            for (let col = range.s.c; col <= maxCol; col++) {
+              const cellAddress = XLSX.utils.encode_cell({ r: 0, c: col });
+              const cell = firstSheet[cellAddress];
+              
+              let cellValue = '';
+              if (cell) {
+                // Prefer formatted value (w), then raw value (v)
+                if (cell.w) {
+                  cellValue = String(cell.w).trim();
+                } else if (cell.v !== null && cell.v !== undefined) {
+                  cellValue = String(cell.v).trim();
+                }
+              }
+              
+              // Only add non-empty values that aren't _EMPTY placeholders
+              if (cellValue && !cellValue.startsWith('_EMPTY')) {
+                rowHeaders.push(cellValue);
+              } else if (cellValue === '' && rowHeaders.length > 0) {
+                // If we hit an empty cell after finding headers, continue (might have gaps)
+                // But if we haven't found any headers yet, keep going
+                continue;
+              }
             }
+            
+            // Also check if we need to look beyond the initial range
+            if (rowHeaders.length === 0 && range.e.c < 50) {
+              for (let col = range.e.c + 1; col <= 50; col++) {
+                const cellAddress = XLSX.utils.encode_cell({ r: 0, c: col });
+                const cell = firstSheet[cellAddress];
+                
+                if (cell) {
+                  let cellValue = '';
+                  if (cell.w) {
+                    cellValue = String(cell.w).trim();
+                  } else if (cell.v !== null && cell.v !== undefined) {
+                    cellValue = String(cell.v).trim();
+                  }
+                  
+                  if (cellValue && !cellValue.startsWith('_EMPTY')) {
+                    rowHeaders.push(cellValue);
+                  } else if (cellValue === '' && rowHeaders.length > 0) {
+                    break; // Stop at empty cell if we have headers
+                  }
+                } else if (rowHeaders.length > 0) {
+                  break; // Stop if no cell and we have headers
+                }
+              }
+            }
+            
+            if (rowHeaders.length >= 3) {
+              headers = rowHeaders;
+              console.log('Method 1 succeeded. Found headers:', headers);
+            } else {
+              console.log('Method 1 found', rowHeaders.length, 'headers, need at least 3');
+            }
+          } catch (e) {
+            console.log('Method 1 (direct cell read) failed, trying method 2...', e);
+          }
+
+          // Method 2: Try reading as array and find header row
+          if (headers.length === 0) {
+            try {
+              const allData = XLSX.utils.sheet_to_json(firstSheet, { header: 1, defval: '', raw: false }) as any[][];
+              
+              if (allData.length === 0) {
+                alert('Excel file is empty');
+                return;
+              }
+
+              // Try to find the header row (first row with at least 3 non-empty cells)
+              let headerRowIndex = -1;
+              for (let i = 0; i < Math.min(5, allData.length); i++) {
+                const row = allData[i] as any[];
+                if (!row) continue;
+                
+                const nonEmptyCells = row
+                  .map((cell: any) => {
+                    if (cell === null || cell === undefined) return '';
+                    if (typeof cell === 'object' && cell.w) return String(cell.w).trim();
+                    return String(cell || '').trim();
+                  })
+                  .filter((cell: string) => {
+                    return cell !== '' && !cell.startsWith('_EMPTY');
+                  });
+                
+                if (nonEmptyCells.length >= 3) {
+                  headerRowIndex = i;
+                  break;
+                }
+              }
+
+              if (headerRowIndex >= 0) {
+                const headerRow = allData[headerRowIndex] as any[];
+                headers = headerRow
+                  .map((h: any) => {
+                    // Handle various data types
+                    if (h === null || h === undefined) return '';
+                    if (typeof h === 'object' && h.w) return String(h.w).trim(); // Formatted value
+                    return String(h).trim();
+                  })
+                  .filter((h: string) => {
+                    const trimmed = h.trim();
+                    return trimmed !== '' && 
+                           !trimmed.startsWith('_EMPTY') && 
+                           trimmed !== 'undefined' &&
+                           trimmed !== 'null';
+                  });
+              }
+            } catch (e) {
+              console.log('Method 2 failed, trying method 3...');
+            }
+          }
+
+          // Method 3: Try reading as JSON (fallback - may create _EMPTY keys)
+          if (headers.length === 0) {
+            try {
+              const jsonData = XLSX.utils.sheet_to_json(firstSheet, { defval: '', raw: false });
+              if (jsonData.length > 0) {
+                headers = Object.keys(jsonData[0] as any);
+                // Filter out empty headers and _EMPTY placeholders
+                headers = headers
+                  .map(h => String(h || '').trim())
+                  .filter(h => {
+                    // Remove empty strings, _EMPTY, and _EMPTY_N patterns
+                    const trimmed = h.trim();
+                    return trimmed !== '' && 
+                           !trimmed.startsWith('_EMPTY') && 
+                           trimmed !== 'undefined' &&
+                           trimmed !== 'null';
+                  });
+              }
+            } catch (e) {
+              console.log('Method 3 failed');
+            }
+          }
+
+          // Method 2: If Method 1 didn't work, try reading as array and find header row
+          if (headers.length === 0) {
+            try {
+              const allData = XLSX.utils.sheet_to_json(firstSheet, { header: 1, defval: '', raw: false }) as any[][];
+              
+              if (allData.length === 0) {
+                alert('Excel file is empty');
+                return;
+              }
+
+              // Try to find the header row (first row with at least 3 non-empty cells)
+              let headerRowIndex = -1;
+              for (let i = 0; i < Math.min(5, allData.length); i++) {
+                const row = allData[i] as any[];
+                if (!row) continue;
+                
+                const nonEmptyCells = row
+                  .map((cell: any) => String(cell || '').trim())
+                  .filter((cell: string) => cell !== '');
+                
+                if (nonEmptyCells.length >= 3) {
+                  headerRowIndex = i;
+                  break;
+                }
+              }
+
+              if (headerRowIndex >= 0) {
+                const headerRow = allData[headerRowIndex] as any[];
+                headers = headerRow
+                  .map((h: any) => {
+                    // Handle various data types
+                    if (h === null || h === undefined) return '';
+                    if (typeof h === 'object' && h.w) return String(h.w).trim(); // Formatted value
+                    return String(h).trim();
+                  })
+                  .filter((h: string) => {
+                    const trimmed = h.trim();
+                    return trimmed !== '' && 
+                           !trimmed.startsWith('_EMPTY') && 
+                           trimmed !== 'undefined' &&
+                           trimmed !== 'null';
+                  });
+              }
+            } catch (e) {
+              console.log('Method 2 failed, trying method 3...');
+            }
+          }
+
+
+          // Final check
+          if (headers.length === 0) {
+            alert('Could not detect column headers in the Excel file. Please ensure:\n' +
+                  '1. The first row contains column names\n' +
+                  '2. At least 3 columns have headers\n' +
+                  '3. The file is not corrupted\n\n' +
+                  'You can also try opening and saving the file again in Excel.');
+            return;
+          }
+
+          // Remove any duplicate headers by appending index if needed
+          const uniqueHeaders: string[] = [];
+          const seenHeaders = new Set<string>();
+          headers.forEach((header, index) => {
+            let uniqueHeader = header;
+            let counter = 1;
+            while (seenHeaders.has(uniqueHeader)) {
+              uniqueHeader = `${header}_${counter}`;
+              counter++;
+            }
+            seenHeaders.add(uniqueHeader);
+            uniqueHeaders.push(uniqueHeader);
           });
 
-          if (columns.length === 0) {
-            alert('No valid columns found in Excel file. Please check the format.');
-            return;
+          // Extract all row data
+          let rowData: Record<string, any>[] = [];
+          try {
+            // Read all data rows (skip header row)
+            const allData = XLSX.utils.sheet_to_json(firstSheet, { header: 1, defval: '', raw: false }) as any[][];
+            
+            // Find header row index
+            let headerRowIndex = 0;
+            for (let i = 0; i < Math.min(5, allData.length); i++) {
+              const row = allData[i] as any[];
+              if (!row) continue;
+              const nonEmptyCells = row
+                .map((cell: any) => {
+                  if (cell === null || cell === undefined) return '';
+                  if (typeof cell === 'object' && cell.w) return String(cell.w).trim();
+                  return String(cell || '').trim();
+                })
+                .filter((cell: string) => cell !== '' && !cell.startsWith('_EMPTY'));
+              if (nonEmptyCells.length >= 3) {
+                headerRowIndex = i;
+                break;
+              }
+            }
+
+            // Extract data rows (after header row)
+            const dataStartIndex = headerRowIndex + 1;
+            const dataRows = allData.slice(dataStartIndex);
+
+            // Convert data rows to objects using headers
+            for (let i = 0; i < dataRows.length; i++) {
+              const row = dataRows[i] as any[];
+              if (!row || row.length === 0) continue;
+
+              const rowObject: Record<string, any> = {};
+              uniqueHeaders.forEach((header, idx) => {
+                const cellValue = row[idx];
+                if (cellValue !== null && cellValue !== undefined) {
+                  // Handle formatted values
+                  if (typeof cellValue === 'object' && cellValue.w) {
+                    rowObject[header] = String(cellValue.w).trim();
+                  } else {
+                    rowObject[header] = String(cellValue || '').trim();
+                  }
+                } else {
+                  rowObject[header] = '';
+                }
+              });
+
+              // Only add row if it has at least one non-empty value
+              const hasData = Object.values(rowObject).some(val => val !== '');
+              if (hasData) {
+                rowData.push(rowObject);
+              }
+            }
+          } catch (err) {
+            console.error('Error extracting row data:', err);
+            // Continue even if row extraction fails - at least we have headers
           }
+
+          // Create columns - all as text type, all editable by default
+          const columns: Column[] = uniqueHeaders.map((header, index) => {
+            // Determine if required based on header name
+            const headerLower = header.toLowerCase();
+            const required = headerLower.includes('emp id') || 
+                           headerLower.includes('employee id') || 
+                           headerLower.includes('name') ||
+                           headerLower.includes('employee name') ||
+                           headerLower.includes('s.no') ||
+                           headerLower.includes('serial') ||
+                           headerLower.includes('s.no');
+
+            return {
+              name: header,
+              type: 'text' as const, // All columns as text type
+              required: required,
+              editable: true, // Default to editable (admin can change in form)
+              validation: {},
+              order: index,
+            };
+          });
+
+          // Generate format name from filename or use default
+          const fileName = file.name.replace(/\.[^/.]+$/, ''); // Remove extension
+          const formatName = fileName || `Imported Format - ${new Date().toLocaleDateString()}`;
+          const formatDescription = `Format created from Excel file: ${file.name}`;
+
+          // Store imported row data
+          setImportedRowData(rowData);
 
           // Populate form with imported data
           setFormData({
@@ -295,9 +563,10 @@ function ExcelFormatsComponent() {
             assignedTo: [],
           });
           setShowForm(true);
-          alert(`Imported format "${formatName}" with ${columns.length} columns successfully!`);
+          alert(`Imported format "${formatName}" with ${columns.length} columns and ${rowData.length} rows successfully! You can now configure editable/read-only permissions for each column.`);
         } catch (err: any) {
-          alert('Failed to import format: ' + err.message);
+          console.error('Import error:', err);
+          alert('Failed to import format: ' + (err.message || 'Unknown error occurred. Please check the console for details.'));
         }
       };
       reader.readAsArrayBuffer(file);
@@ -335,8 +604,35 @@ function ExcelFormatsComponent() {
 
       const result = await response.json();
       if (result.success) {
+        const formatId = result.data._id || result.data.id;
+        
+        // If we have imported row data and this is a new format, save it
+        if (!editingFormat && importedRowData.length > 0 && formatId) {
+          try {
+            const saveDataResponse = await fetch('/api/admin/excel-formats/save-template-data', {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                formatId,
+                rows: importedRowData,
+              }),
+            });
+            
+            const saveDataResult = await saveDataResponse.json();
+            if (!saveDataResult.success) {
+              console.error('Failed to save template data:', saveDataResult.error);
+            }
+          } catch (err) {
+            console.error('Error saving template data:', err);
+          }
+        }
+        
         setShowForm(false);
         setEditingFormat(null);
+        setImportedRowData([]); // Clear imported data
         setFormData({
           name: '',
           description: '',
@@ -345,7 +641,7 @@ function ExcelFormatsComponent() {
           assignedTo: [],
         });
         fetchFormats();
-        alert(editingFormat ? 'Format updated successfully!' : 'Format created successfully!');
+        alert(editingFormat ? 'Format updated successfully!' : `Format created successfully with ${importedRowData.length} rows!`);
       } else {
         alert(result.error || 'Failed to save format');
       }
@@ -356,10 +652,14 @@ function ExcelFormatsComponent() {
 
   const handleEdit = (format: ExcelFormat) => {
     setEditingFormat(format);
+    setImportedRowData([]); // Clear imported data when editing
     setFormData({
       name: format.name,
       description: format.description || '',
-      columns: format.columns,
+      columns: format.columns.map(col => ({
+        ...col,
+        editable: col.editable !== undefined ? col.editable : true, // Ensure editable property exists
+      })),
       assignedToType: format.assignedToType,
       assignedTo: format.assignedTo.map(id => String(id)), // Ensure IDs are strings
     });
@@ -525,6 +825,13 @@ function ExcelFormatsComponent() {
           <h1 className="text-3xl font-bold">Excel Format Management</h1>
           <div className="flex gap-2">
             <button
+              onClick={handleDownloadFormatTemplate}
+
+              className="bg-green-600 text-white px-4 py-2 rounded-md hover:bg-green-700"
+            >
+              📥 Download Format Template
+            </button>
+            <button
               onClick={() => {
                 setShowForm(!showForm);
                 setEditingFormat(null);
@@ -547,7 +854,8 @@ function ExcelFormatsComponent() {
         <div className="bg-white rounded-lg shadow p-6 mb-6">
           <h2 className="text-xl font-semibold mb-4">Import Format from Excel</h2>
           <p className="text-sm text-gray-600 mb-4">
-            Upload an Excel file to automatically create a format. The first row should contain column names.
+            Upload an Excel file to automatically create a format. The first row should contain column names. 
+            All columns will be set as <strong>text type</strong>. You can configure editable/read-only permissions for each column after import.
           </p>
           <input
             type="file"
@@ -597,7 +905,7 @@ function ExcelFormatsComponent() {
                 <div className="space-y-2 mb-2">
                   {formData.columns.map((col, index) => (
                     <div key={index} className="flex gap-2 items-start p-3 bg-gray-50 rounded border">
-                      <div className="flex-1 grid grid-cols-4 gap-2">
+                      <div className="flex-1 grid grid-cols-5 gap-2">
                         <input
                           type="text"
                           value={col.name}
@@ -625,6 +933,17 @@ function ExcelFormatsComponent() {
                             className="mr-1"
                           />
                           Required
+                        </label>
+                        <label className="flex items-center text-sm">
+                          <input
+                            type="checkbox"
+                            checked={col.editable !== undefined ? col.editable : true}
+                            onChange={(e) => updateColumn(index, 'editable', e.target.checked)}
+                            className="mr-1"
+                          />
+                          <span className={col.editable === false ? 'text-red-600 font-semibold' : 'text-green-600'}>
+                            {col.editable === false ? 'Read Only' : 'Editable'}
+                          </span>
                         </label>
                         {col.type === 'dropdown' && (
                           <input
@@ -867,6 +1186,7 @@ function ExcelFormatsComponent() {
                   onClick={() => {
                     setShowForm(false);
                     setEditingFormat(null);
+                    setImportedRowData([]);
                   }}
                   className="px-6 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700"
                 >
@@ -903,72 +1223,11 @@ function ExcelFormatsComponent() {
                         )}
                       </td>
                       <td className="px-6 py-4">
-                        <div className="text-sm text-gray-900 mb-2">
+                        <div className="text-sm text-gray-900">
                           {format.columns.length} columns
                         </div>
-                        <div className="text-xs text-gray-500 mb-2">
-                          {format.columns.sort((a, b) => a.order - b.order).map(c => c.name).join(', ')}
-                        </div>
-                        {/* Sample format example */}
-                        <div className="mt-3">
-                          <p className="text-xs font-semibold text-gray-700 mb-1">Use this format like this:</p>
-                          <div className="overflow-x-auto">
-                            <table className="min-w-full text-xs border border-gray-300">
-                              <thead className="bg-gray-100">
-                                <tr>
-                                  {format.columns
-                                    .sort((a, b) => a.order - b.order)
-                                    .map((col) => (
-                                      <th key={col.name} className="px-1 py-0.5 border border-gray-300 text-left font-semibold text-[10px]">
-                                        {col.name}
-                                      </th>
-                                    ))}
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {/* Sample row 1 */}
-                                <tr className="bg-white">
-                                  {format.columns
-                                    .sort((a, b) => a.order - b.order)
-                                    .map((col) => {
-                                      let sampleValue = 'Example';
-                                      if (col.type === 'number') sampleValue = '0';
-                                      else if (col.type === 'date') sampleValue = '2024-01-01';
-                                      else if (col.type === 'email') sampleValue = 'example@email.com';
-                                      else if (col.type === 'dropdown' && col.validation?.options?.[0]) {
-                                        sampleValue = col.validation.options[0];
-                                      }
-                                      return (
-                                        <td key={col.name} className="px-1 py-0.5 border border-gray-300 text-gray-600 text-[10px]">
-                                          {sampleValue}
-                                        </td>
-                                      );
-                                    })}
-                                </tr>
-                                {/* Sample row 2 */}
-                                <tr className="bg-gray-50">
-                                  {format.columns
-                                    .sort((a, b) => a.order - b.order)
-                                    .map((col) => {
-                                      let sampleValue = 'Sample';
-                                      if (col.type === 'number') sampleValue = '1';
-                                      else if (col.type === 'date') sampleValue = '2024-01-02';
-                                      else if (col.type === 'email') sampleValue = 'sample@email.com';
-                                      else if (col.type === 'dropdown' && col.validation?.options?.[1]) {
-                                        sampleValue = col.validation.options[1];
-                                      } else if (col.type === 'dropdown' && col.validation?.options?.[0]) {
-                                        sampleValue = col.validation.options[0];
-                                      }
-                                      return (
-                                        <td key={col.name} className="px-1 py-0.5 border border-gray-300 text-gray-600 text-[10px]">
-                                          {sampleValue}
-                                        </td>
-                                      );
-                                    })}
-                                </tr>
-                              </tbody>
-                            </table>
-                          </div>
+                        <div className="text-xs text-gray-500">
+                          {format.columns.map(c => c.name).join(', ')}
                         </div>
                       </td>
                       <td className="px-6 py-4 text-sm text-gray-900">
@@ -984,20 +1243,33 @@ function ExcelFormatsComponent() {
                       <td className="px-6 py-4 text-sm font-medium">
                         <div className="flex flex-col gap-2">
                           <div className="flex gap-2">
-                            <button
-                              onClick={() => handleEdit(format)}
-                              className="text-blue-600 hover:text-blue-900"
-                            >
-                              Edit
-                            </button>
-                            <button
-                              onClick={() => handleDelete(format._id)}
-                              className="text-red-600 hover:text-red-900"
-                            >
-                              Delete
-                            </button>
+                          <button
+                            onClick={() => handleDownloadFormatExcel(format)}
+                            className="text-green-600 hover:text-green-900 mr-2"
+                            title="Download Format as Excel"
+                          >
+                            📥 Download
+                          </button>
+                          <button
+                            onClick={() => handleEdit(format)}
+                            className="text-blue-600 hover:text-blue-900"
+                          >
+                            Edit
+                          </button>
+                          <button
+                            onClick={() => handleDelete(format._id)}
+                            className="text-red-600 hover:text-red-900"
+                          >
+                            Delete
+                          </button>
                           </div>
                           <div className="flex gap-2">
+                            <button
+                              onClick={() => handleDownloadFormat(format._id, format.name)}
+                              className="text-green-600 hover:text-green-900 text-xs"
+                            >
+                              Download Template
+                            </button>
                             <button
                               onClick={() => {
                                 setUploadingFormat(format._id);

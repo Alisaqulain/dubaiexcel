@@ -15,10 +15,10 @@ async function handleGetCreatedExcelFiles(req: AuthenticatedRequest) {
     // Get query parameters
     const { searchParams } = new URL(req.url);
     const labourType = searchParams.get('labourType');
-    const limit = parseInt(searchParams.get('limit') || '50');
+    const limit = parseInt(searchParams.get('limit') || '1000'); // Increased limit to show more files
     const skip = parseInt(searchParams.get('skip') || '0');
 
-    // Build query
+    // Build query - include all files (both employee-saved and admin-uploaded)
     const query: any = {};
     if (labourType && ['OUR_LABOUR', 'SUPPLY_LABOUR', 'SUBCONTRACTOR'].includes(labourType)) {
       query.labourType = labourType;
