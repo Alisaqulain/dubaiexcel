@@ -383,7 +383,151 @@ async function handleSaveExcel(req: AuthenticatedRequest) {
       existingFile.originalFilename = file.name;
       existingFile.fileData = buffer;
       existingFile.rowCount = rowCount;
+      const userIdObj = new mongoose.Types.ObjectId(userId as string);
+      existingFile.lastEditedAt = new Date();
+      existingFile.lastEditedBy = userIdObj;
+      existingFile.lastEditedByName = userName;
       await existingFile.save();
+
+      // Find all merged files that include this file in their mergedFrom array
+      const mergedFiles = await CreatedExcelFile.find({
+        isMerged: true,
+        mergedFrom: { $in: [fileId] }
+      }).select('+fileData').lean();
+
+      const updatedMergedFiles: string[] = [];
+
+      // Regenerate each merged file that includes this edited file
+      if (mergedFiles.length > 0) {
+        const ExcelFormat = (await import('@/models/ExcelFormat')).default;
+        
+        for (const mergedFile of mergedFiles) {
+          try {
+            // Get all source files for this merged file
+            const sourceFileIds = (mergedFile.mergedFrom || []).map((id: any) => id.toString());
+            const sourceFiles = await CreatedExcelFile.find({
+              _id: { $in: sourceFileIds }
+            }).select('+fileData').lean();
+
+            if (sourceFiles.length === 0) continue;
+
+            // Reuse merge logic to regenerate the merged file
+            const allHeadersSet = new Set<string>();
+            const fileDataArray: Array<{ filename: string; rows: any[]; headers: string[] }> = [];
+
+            // Process each source file
+            for (const sourceFile of sourceFiles) {
+              const fileBuffer = Buffer.isBuffer(sourceFile.fileData) 
+                ? sourceFile.fileData 
+                : Buffer.from(sourceFile.fileData as any);
+              
+              const workbook = XLSX.read(fileBuffer, { type: 'buffer' });
+              const firstSheetName = workbook.SheetNames[0];
+              const worksheet = workbook.Sheets[firstSheetName];
+              const jsonData = XLSX.utils.sheet_to_json(worksheet, { defval: '' });
+
+              if (jsonData.length > 0) {
+                const fileHeaders = Object.keys(jsonData[0] as any);
+                fileHeaders.forEach(h => allHeadersSet.add(h));
+                fileDataArray.push({
+                  filename: sourceFile.originalFilename,
+                  rows: jsonData,
+                  headers: fileHeaders,
+                });
+              }
+            }
+
+            if (fileDataArray.length === 0) continue;
+
+            // Create unified headers
+            const unifiedHeaders = Array.from(allHeadersSet).sort();
+            
+            // Normalize all rows
+            const allRows: any[] = [];
+            fileDataArray.forEach(({ rows }) => {
+              rows.forEach((row: any) => {
+                const normalizedRow: any = {};
+                unifiedHeaders.forEach(header => {
+                  normalizedRow[header] = row[header] !== undefined && row[header] !== null 
+                    ? String(row[header]).trim() 
+                    : '';
+                });
+                allRows.push(normalizedRow);
+              });
+            });
+
+            // Handle unique columns (remove duplicates)
+            const activeFormats = await ExcelFormat.find({ active: true }).lean();
+            const uniqueColumns: string[] = [];
+            activeFormats.forEach((format: any) => {
+              if (format.columns && Array.isArray(format.columns)) {
+                format.columns.forEach((col: any) => {
+                  if (col.unique === true && unifiedHeaders.includes(col.name)) {
+                    if (!uniqueColumns.includes(col.name)) {
+                      uniqueColumns.push(col.name);
+                    }
+                  }
+                });
+              }
+            });
+
+            if (uniqueColumns.length > 0) {
+              const seenValues: { [colName: string]: Set<string> } = {};
+              uniqueColumns.forEach((colName: string) => {
+                seenValues[colName] = new Set<string>();
+              });
+              
+              const deduplicatedRows: any[] = [];
+              allRows.forEach((row: any) => {
+                let isDuplicate = false;
+                uniqueColumns.forEach((colName: string) => {
+                  const value = String(row[colName] || '').trim().toLowerCase();
+                  if (value !== '' && seenValues[colName].has(value)) {
+                    isDuplicate = true;
+                  } else if (value !== '') {
+                    seenValues[colName].add(value);
+                  }
+                });
+                if (!isDuplicate) {
+                  deduplicatedRows.push(row);
+                }
+              });
+              
+              allRows.length = 0;
+              allRows.push(...deduplicatedRows);
+            }
+
+            // Create merged workbook
+            const mergedWorkbook = XLSX.utils.book_new();
+            const mergedWorksheet = XLSX.utils.json_to_sheet(allRows);
+            const colWidths = unifiedHeaders.map(() => ({ wch: 20 }));
+            mergedWorksheet['!cols'] = colWidths;
+            XLSX.utils.book_append_sheet(mergedWorkbook, mergedWorksheet, 'Merged Data');
+
+            // Generate Excel buffer
+            const mergedBuffer = Buffer.from(
+              XLSX.write(mergedWorkbook, { type: 'array', bookType: 'xlsx' })
+            );
+
+            // Update the merged file
+            await CreatedExcelFile.updateOne(
+              { _id: mergedFile._id },
+              {
+                fileData: mergedBuffer,
+                rowCount: allRows.length,
+                lastEditedAt: new Date(),
+                lastEditedBy: userIdObj,
+                lastEditedByName: userName || 'User',
+              }
+            );
+
+            updatedMergedFiles.push(mergedFile.originalFilename);
+            console.log(`Auto-updated merged file: ${mergedFile.originalFilename} after editing source file: ${existingFile.originalFilename}`);
+          } catch (error: any) {
+            console.error(`Failed to auto-update merged file ${mergedFile._id}:`, error);
+          }
+        }
+      }
 
       return NextResponse.json({
         success: true,
@@ -395,7 +539,12 @@ async function handleSaveExcel(req: AuthenticatedRequest) {
           rowCount: existingFile.rowCount,
           createdAt: existingFile.createdAt,
           updatedAt: existingFile.updatedAt,
+          lastEditedAt: existingFile.lastEditedAt,
+          lastEditedBy: existingFile.lastEditedBy,
+          lastEditedByName: existingFile.lastEditedByName,
         },
+        updatedMergedFiles: updatedMergedFiles.length > 0 ? updatedMergedFiles : undefined,
+        mergedFilesUpdated: updatedMergedFiles.length,
       });
     } else {
       // Create new file

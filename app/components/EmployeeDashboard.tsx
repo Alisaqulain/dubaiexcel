@@ -232,6 +232,8 @@ export default function EmployeeDashboard() {
                     <button
                       onClick={() => {
                         setSelectedFormat(format);
+                        setEditingFileId(null); // Clear editing state
+                        setFileData([]); // Clear file data
                         setShowExcelCreator(true);
                         setMessage(null);
                       }}
@@ -338,6 +340,7 @@ export default function EmployeeDashboard() {
               </button>
             </div>
             <ExcelCreator 
+              key={`${selectedFormat._id}-${editingFileId || 'new'}`} // Force remount when format or file changes
               labourType="OUR_LABOUR"
               useCustomFormat={true}
               formatId={selectedFormat._id}
@@ -355,6 +358,7 @@ export default function EmployeeDashboard() {
                 setSelectedFormat(null);
                 setEditingFileId(null);
                 setFileData([]);
+                setViewingFileId(null);
                 fetchMyCreatedFiles();
                 setMessage({ type: 'success', text: 'File saved successfully!' });
               }}

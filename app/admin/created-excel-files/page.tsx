@@ -45,7 +45,11 @@ interface CreatedExcelFile {
   mergedFrom?: string[];
   mergedDate?: string;
   mergeCount?: number; // Number of times this file has been used in merges
+  lastEditedAt?: string; // Date when file was last edited
+  lastEditedBy?: string; // User who last edited
+  lastEditedByName?: string; // Name of user who last edited
   createdAt: string;
+  updatedAt?: string;
 }
 
 function CreatedExcelFilesComponent() {
@@ -66,6 +70,14 @@ function CreatedExcelFilesComponent() {
   const [activeTab, setActiveTab] = useState<'original' | 'merged'>('original'); // Tab to filter files
   const [viewingFileId, setViewingFileId] = useState<string | null>(null);
   const [fileData, setFileData] = useState<any[]>([]);
+  
+  type FileEditNotification = {
+    fileId: string;
+    filename: string;
+    editedAt: string;
+    editedBy: string;
+  };
+  const [fileEditNotifications, setFileEditNotifications] = useState<FileEditNotification[]>([]);
 
   useEffect(() => {
     fetchFiles();
@@ -95,6 +107,30 @@ function CreatedExcelFilesComponent() {
           mergeCount: f.mergeCount 
         })));
         setFiles(filesWithMergeCount);
+        
+        // Check for recently edited files and show notifications
+        const recentlyEdited = filesWithMergeCount.filter((f: any) => {
+          if (!f.lastEditedAt) return false;
+          const editTime = new Date(f.lastEditedAt).getTime();
+          const now = Date.now();
+          // Show notification for files edited in the last 5 minutes
+          return (now - editTime) < 5 * 60 * 1000;
+        });
+        
+        if (recentlyEdited.length > 0) {
+          const newNotifications = recentlyEdited.map((f: any) => ({
+            fileId: f._id,
+            filename: f.originalFilename,
+            editedAt: f.lastEditedAt,
+            editedBy: f.lastEditedByName || 'User',
+          }));
+          setFileEditNotifications(prev => {
+            // Merge with existing, avoiding duplicates
+            const existingIds = new Set(prev.map((n: FileEditNotification) => n.fileId));
+            const uniqueNew = newNotifications.filter((n: FileEditNotification) => !existingIds.has(n.fileId));
+            return [...prev, ...uniqueNew];
+          });
+        }
       } else {
         setMessage({ type: 'error', text: result.error || 'Failed to fetch files' });
       }
@@ -519,6 +555,34 @@ function CreatedExcelFilesComponent() {
           </select>
         </div>
 
+        {/* File Edit Notifications */}
+        {fileEditNotifications.length > 0 && (
+          <div className="mb-4 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+            <div className="flex justify-between items-start mb-2">
+              <h3 className="font-semibold text-blue-900">📝 Recently Edited Files</h3>
+              <button
+                onClick={() => setFileEditNotifications([])}
+                className="text-blue-600 hover:text-blue-800 text-sm"
+              >
+                Dismiss All
+              </button>
+            </div>
+            <div className="space-y-2">
+              {fileEditNotifications.map((notif) => (
+                <div key={notif.fileId} className="text-sm text-blue-800 bg-white p-2 rounded border border-blue-200">
+                  <span className="font-medium">{notif.filename}</span> was edited by <span className="font-medium">{notif.editedBy}</span> at {new Date(notif.editedAt).toLocaleString()}
+                  <button
+                    onClick={() => setFileEditNotifications(prev => prev.filter((n: FileEditNotification) => n.fileId !== notif.fileId))}
+                    className="ml-2 text-blue-600 hover:text-blue-800 text-xs"
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {message && (
           <div className={`mb-4 p-4 rounded-lg ${
             message.type === 'success' ? 'bg-green-50 border border-green-200 text-green-800' : 'bg-red-50 border border-red-200 text-red-800'
@@ -621,13 +685,14 @@ function CreatedExcelFilesComponent() {
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Rows</th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Type</th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Created</th>
+                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Last Edited</th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
               </tr>
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
               {filteredFiles.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="px-6 py-4 text-center text-gray-500">
+                  <td colSpan={9} className="px-6 py-4 text-center text-gray-500">
                     No {activeTab === 'merged' ? 'merged' : 'original'} files found
                   </td>
                 </tr>
@@ -687,6 +752,34 @@ function CreatedExcelFilesComponent() {
                     </td>
                     <td className="px-6 py-4 text-sm text-gray-500">
                       {new Date(file.createdAt).toLocaleDateString()}
+                    </td>
+                    <td className="px-6 py-4 text-sm text-gray-500">
+                      {file.lastEditedAt ? (
+                        <div className="space-y-1">
+                          <div className="font-medium text-gray-700">
+                            {new Date(file.lastEditedAt).toLocaleDateString('en-GB', { 
+                              day: '2-digit', 
+                              month: '2-digit', 
+                              year: 'numeric' 
+                            })}
+                          </div>
+                          <div className="text-xs text-gray-600">
+                            {new Date(file.lastEditedAt).toLocaleTimeString('en-GB', { 
+                              hour: '2-digit', 
+                              minute: '2-digit', 
+                              second: '2-digit',
+                              hour12: false
+                            })}
+                          </div>
+                          {file.lastEditedByName && (
+                            <div className="text-xs text-blue-600 font-medium">
+                              by {file.lastEditedByName}
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <span className="text-gray-400 italic">Never</span>
+                      )}
                     </td>
                     <td className="px-6 py-4 text-sm">
                       <div className="flex gap-2">

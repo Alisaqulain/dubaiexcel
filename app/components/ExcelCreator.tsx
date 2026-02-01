@@ -58,6 +58,29 @@ export default function ExcelCreator({ labourType, onFileCreated, onSaveAndClose
     setCurrentEditingFileId(editingFileId);
   }, [editingFileId]);
 
+  // Reset rows when initialData or editingFileId changes (when editing a different file or starting fresh)
+  useEffect(() => {
+    // Only update if initialData actually changed (not just on every render)
+    if (initialData && initialData.length > 0) {
+      // If we have initial data (editing a file), use it
+      setRows(initialData);
+      setCurrentEditingFileId(editingFileId);
+      setMessage(null); // Clear any previous messages
+    } else if ((editingFileId === undefined || editingFileId === null) && currentEditingFileId !== undefined) {
+      // If editing was cleared, reset to template rows or empty
+      if (templateRows.length > 0) {
+        setRows(templateRows);
+      } else {
+        setRows([]);
+      }
+      setCurrentEditingFileId(undefined);
+    } else if (editingFileId === undefined && !initialData && templateRows.length > 0 && rows.length === 0) {
+      // Initial load: use template rows if available
+      setRows(templateRows);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialData, editingFileId]);
+
   // Define default columns based on labour type
   const getDefaultColumns = (): Column[] => {
     switch (labourType) {
@@ -614,14 +637,24 @@ export default function ExcelCreator({ labourType, onFileCreated, onSaveAndClose
         // Save row count before clearing
         const savedRowCount = rows.length;
         
+        // Check if merged files were auto-updated
+        let successText = wasEditing 
+          ? `Excel file updated successfully! (${savedRowCount} rows) File saved and form cleared. You can now add new data.` 
+          : `Excel file saved successfully! (${savedRowCount} rows) File saved and form cleared. You can now add new data.`;
+        
+        if (result.data?.updatedMergedFiles && result.data.updatedMergedFiles.length > 0) {
+          successText += `\n\n✅ Auto-updated ${result.data.updatedMergedFiles.length} merged file(s):\n${result.data.updatedMergedFiles.map((name: string) => `  • ${name}`).join('\n')}\n\nAdmin will be notified.`;
+          
+          // Show alert for merged files update
+          alert(`✅ File Updated Successfully!\n\n📋 Auto-updated ${result.data.updatedMergedFiles.length} merged file(s):\n${result.data.updatedMergedFiles.map((name: string) => `  • ${name}`).join('\n')}\n\nAdmin will be notified of these changes.`);
+        }
+        
         // Clear all rows after successful save
         setRows([]);
         
         setMessage({ 
           type: 'success', 
-          text: wasEditing 
-            ? `Excel file updated successfully! (${savedRowCount} rows) File saved and form cleared. You can now add new data.` 
-            : `Excel file saved successfully! (${savedRowCount} rows) File saved and form cleared. You can now add new data.` 
+          text: successText
         });
         
         // Also call the onFileCreated callback if provided

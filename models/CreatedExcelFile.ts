@@ -13,6 +13,9 @@ export interface ICreatedExcelFile extends Document {
   mergedFrom?: mongoose.Types.ObjectId[]; // IDs of files that were merged
   mergedDate?: Date; // Date when files were merged
   mergeCount?: number; // Number of times this file has been used in merges
+  lastEditedAt?: Date; // Date when file was last edited
+  lastEditedBy?: mongoose.Types.ObjectId; // User who last edited the file
+  lastEditedByName?: string; // Name of user who last edited
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -34,6 +37,9 @@ const CreatedExcelFileSchema = new Schema<ICreatedExcelFile>({
   mergedFrom: [{ type: Schema.Types.ObjectId, ref: 'CreatedExcelFile' }],
   mergedDate: { type: Date },
   mergeCount: { type: Number, default: 0 }, // Track how many times this file has been merged
+  lastEditedAt: { type: Date },
+  lastEditedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+  lastEditedByName: { type: String },
 }, {
   timestamps: true,
 });
