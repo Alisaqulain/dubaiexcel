@@ -111,11 +111,12 @@ async function handleSaveExcel(req: AuthenticatedRequest) {
     }
 
     // Validate file against assigned format
-    const arrayBuffer = await file.arrayBuffer();
-    const workbook = XLSX.read(arrayBuffer, { type: 'array' });
+    const originalArrayBuffer = await file.arrayBuffer();
+    let arrayBuffer: ArrayBuffer | Buffer = originalArrayBuffer;
+    const workbook = XLSX.read(originalArrayBuffer, { type: 'array' });
     const firstSheetName = workbook.SheetNames[0];
     const worksheet = workbook.Sheets[firstSheetName];
-    const jsonData = XLSX.utils.sheet_to_json(worksheet, { defval: '', header: 1 });
+    const jsonData = XLSX.utils.sheet_to_json(worksheet, { defval: '', header: 1 }) as any[][];
 
     if (jsonData.length === 0) {
       return NextResponse.json(
@@ -124,10 +125,10 @@ async function handleSaveExcel(req: AuthenticatedRequest) {
       );
     }
 
-    const headers = (jsonData[0] as any[]) || [];
+    const headers = ((jsonData[0] as any[]) || []).map((h: any) => String(h || '').trim());
     const formatColumns = (assignedFormat as any).columns.sort((a: any, b: any) => a.order - b.order);
-    const requiredColumns = formatColumns.filter((col: any) => col.required).map((col: any) => col.name);
-    const formatColumnNames = formatColumns.map((col: any) => col.name);
+    const requiredColumns = formatColumns.filter((col: any) => col.required).map((col: any) => col.name.trim());
+    const formatColumnNames = formatColumns.map((col: any) => col.name.trim());
 
     // Check for missing required columns
     const missingColumns = requiredColumns.filter((colName: string) => !headers.includes(colName));
@@ -193,8 +194,168 @@ async function handleSaveExcel(req: AuthenticatedRequest) {
       }, { status: 400 });
     }
 
-    // File is validated, convert to buffer (reuse arrayBuffer from above)
-    const buffer = Buffer.from(arrayBuffer);
+    // Check for duplicate values in unique columns
+    const uniqueColumns = formatColumns.filter((col: any) => col.unique === true);
+    console.log('Checking unique columns:', uniqueColumns.map((c: any) => ({ name: c.name, unique: c.unique })));
+    console.log('File headers:', headers);
+    
+    if (uniqueColumns.length > 0) {
+      const dataRows = jsonData.slice(1) as any[][]; // Skip header row
+      const duplicateErrors: string[] = [];
+      
+      uniqueColumns.forEach((col: any) => {
+        // Normalize column name for matching (case-insensitive, trim whitespace)
+        const colNameNormalized = col.name.trim();
+        const colIndex = headers.findIndex((h: string) => {
+          const headerNormalized = String(h || '').trim().toLowerCase();
+          return headerNormalized === colNameNormalized.toLowerCase();
+        });
+        
+        console.log(`Looking for column "${col.name}" (normalized: "${colNameNormalized}") - found at index: ${colIndex}`);
+        
+        if (colIndex === -1) {
+          console.warn(`Unique column "${col.name}" not found in file headers. Available headers:`, headers);
+          console.warn(`Tried to match: "${colNameNormalized.toLowerCase()}"`);
+          return; // Column not found in file
+        }
+        
+        const valueMap = new Map<string, number[]>(); // Map normalized value -> array of row indices
+        
+        dataRows.forEach((row: any[], rowIndex: number) => {
+          const rawValue = row[colIndex];
+          const value = rawValue !== undefined && rawValue !== null ? String(rawValue).trim() : '';
+          
+          // Check all non-empty values (case-insensitive)
+          if (value !== '') {
+            const normalizedValue = value.toLowerCase(); // Case-insensitive comparison
+            if (!valueMap.has(normalizedValue)) {
+              valueMap.set(normalizedValue, []);
+            }
+            valueMap.get(normalizedValue)!.push(rowIndex + 2); // +2 because Excel rows start at 1 and we skip header
+          }
+        });
+        
+        console.log(`Column "${col.name}" value map:`, Array.from(valueMap.entries()));
+        
+        // Find duplicates
+        valueMap.forEach((rowIndices, normalizedValue) => {
+          if (rowIndices.length > 1) {
+            // Find the original case value for display
+            const originalValue = dataRows[rowIndices[0] - 2]?.[colIndex] ? String(dataRows[rowIndices[0] - 2][colIndex]).trim() : normalizedValue;
+            duplicateErrors.push(
+              `Column "${col.name}" must be unique. Duplicate value "${originalValue}" found in rows: ${rowIndices.join(', ')}`
+            );
+            console.error(`DUPLICATE FOUND: Column "${col.name}", Value "${originalValue}", Rows: ${rowIndices.join(', ')}`);
+          }
+        });
+      });
+      
+      if (duplicateErrors.length > 0) {
+        // Log for debugging
+        console.error('=== DUPLICATE VALIDATION FAILED ===');
+        console.error('Duplicate errors:', duplicateErrors);
+        console.error('Unique columns checked:', uniqueColumns.map((c: any) => c.name));
+        console.error('Headers in file:', headers);
+        console.error('Format columns:', formatColumns.map((c: any) => ({ name: c.name, unique: c.unique })));
+        
+        // Return error - file will NOT be saved
+        return NextResponse.json({
+          success: false,
+          error: `Cannot save file: Duplicate values found in unique columns. File was NOT saved.`,
+          validationError: true,
+          duplicateErrors,
+          message: `Found ${duplicateErrors.length} duplicate value(s) in unique columns. Please remove duplicates and try again.`,
+        }, { status: 400 });
+      } else {
+        console.log('✅ Unique validation passed - no duplicates found');
+      }
+    }
+
+    // Validate dropdown columns - check if values match allowed options
+    const dropdownColumns = formatColumns.filter((col: any) => col.type === 'dropdown' && col.validation?.options && col.validation.options.length > 0);
+    console.log('Checking dropdown columns:', dropdownColumns.map((c: any) => ({ name: c.name, options: c.validation?.options })));
+    
+    if (dropdownColumns.length > 0) {
+      const dataRows = jsonData.slice(1) as any[][]; // Skip header row
+      const dropdownErrors: string[] = [];
+      
+      dropdownColumns.forEach((col: any) => {
+        // Normalize column name for matching (case-insensitive, trim whitespace)
+        const colNameNormalized = col.name.trim();
+        const colIndex = headers.findIndex((h: string) => {
+          const headerNormalized = String(h || '').trim().toLowerCase();
+          return headerNormalized === colNameNormalized.toLowerCase();
+        });
+        
+        if (colIndex === -1) {
+          console.warn(`Dropdown column "${col.name}" not found in file headers. Available headers:`, headers);
+          return; // Column not found in file
+        }
+        
+        const allowedOptions = col.validation?.options || [];
+        const allowedOptionsLower = allowedOptions.map((opt: string) => String(opt).trim().toLowerCase());
+        
+        dataRows.forEach((row: any[], rowIndex: number) => {
+          const rawValue = row[colIndex];
+          const value = rawValue !== undefined && rawValue !== null ? String(rawValue).trim() : '';
+          
+          // Only validate non-empty values
+          if (value !== '') {
+            const normalizedValue = value.toLowerCase();
+            const optionIndex = allowedOptionsLower.indexOf(normalizedValue);
+            
+            if (optionIndex === -1) {
+              // Value doesn't match any option (case-insensitive)
+              dropdownErrors.push(
+                `Row ${rowIndex + 2}: Column "${col.name}" must be one of: ${allowedOptions.join(', ')}. Found: "${value}"`
+              );
+              console.error(`DROPDOWN VALIDATION FAILED: Column "${col.name}", Value "${value}", Allowed: ${allowedOptions.join(', ')}`);
+            } else {
+              // Value matches (case-insensitive) - normalize to exact case of defined option
+              const correctCaseValue = allowedOptions[optionIndex];
+              if (value !== correctCaseValue) {
+                // Update the row value to match the exact case of the option
+                row[colIndex] = correctCaseValue;
+                console.log(`Normalized dropdown value: "${value}" -> "${correctCaseValue}" in column "${col.name}", row ${rowIndex + 2}`);
+              }
+            }
+          }
+        });
+      });
+      
+      if (dropdownErrors.length > 0) {
+        // Log for debugging
+        console.error('=== DROPDOWN VALIDATION FAILED ===');
+        console.error('Dropdown errors:', dropdownErrors);
+        console.error('Dropdown columns checked:', dropdownColumns.map((c: any) => ({ name: c.name, options: c.validation?.options })));
+        
+        // Return error - file will NOT be saved
+        return NextResponse.json({
+          success: false,
+          error: `Cannot save file: Invalid dropdown values found. File was NOT saved.`,
+          validationError: true,
+          dropdownErrors,
+          message: `Found ${dropdownErrors.length} invalid dropdown value(s). Please use only allowed options and try again.`,
+        }, { status: 400 });
+      } else {
+        console.log('✅ Dropdown validation passed - all values match allowed options');
+        
+        // If we normalized any dropdown values, regenerate the Excel buffer with updated data
+        if (dropdownColumns.length > 0) {
+          // Check if any values were normalized (we modified jsonData)
+          // Regenerate workbook with normalized values
+          const updatedWorkbook = XLSX.utils.book_new();
+          const updatedWorksheet = XLSX.utils.aoa_to_sheet(jsonData); // Use array of arrays format
+          XLSX.utils.book_append_sheet(updatedWorkbook, updatedWorksheet, 'Data');
+          const updatedBuffer = XLSX.write(updatedWorkbook, { type: 'buffer', bookType: 'xlsx' });
+          // Use updated buffer instead of original (convert Buffer to ArrayBuffer for consistency)
+          arrayBuffer = updatedBuffer;
+        }
+      }
+    }
+
+    // File is validated, convert to buffer (reuse arrayBuffer from above, which may have been updated)
+    const buffer = Buffer.isBuffer(arrayBuffer) ? arrayBuffer : Buffer.from(arrayBuffer as ArrayBuffer);
 
     // Check if this is an update (PUT request with fileId)
     const fileId = formData.get('fileId') as string;

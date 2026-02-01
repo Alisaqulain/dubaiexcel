@@ -323,7 +323,29 @@ export default function ExcelCreator({ labourType, onFileCreated, onSaveAndClose
                 // Editable column - use imported value
                 const excelIndex = columnMapping[colName];
                 if (excelIndex !== undefined && excelIndex !== -1 && row[excelIndex] !== undefined && row[excelIndex] !== null && row[excelIndex] !== '') {
-                  newRow[colName] = String(row[excelIndex]).trim();
+                  const importedValue = String(row[excelIndex]).trim();
+                  
+                  // Check if this column is a dropdown type
+                  const columnDef = currentColumns.find(col => col.name === colName);
+                  if (columnDef && columnDef.type === 'dropdown' && columnDef.validation?.options && columnDef.validation.options.length > 0) {
+                    // For dropdown columns, match case-insensitively and use exact option value
+                    const optionsLower = columnDef.validation.options.map((opt: string) => String(opt).trim().toLowerCase());
+                    const importedValueLower = importedValue.toLowerCase();
+                    const optionIndex = optionsLower.indexOf(importedValueLower);
+                    
+                    if (optionIndex !== -1) {
+                      // Match found - use exact case from options
+                      newRow[colName] = columnDef.validation.options[optionIndex];
+                      console.log(`Matched dropdown value: "${importedValue}" -> "${columnDef.validation.options[optionIndex]}" for column "${colName}"`);
+                    } else {
+                      // No match - leave empty (will show "Select..." in dropdown)
+                      newRow[colName] = '';
+                      console.log(`No dropdown match found for "${importedValue}" in column "${colName}". Available options: ${columnDef.validation.options.join(', ')}`);
+                    }
+                  } else {
+                    // Not a dropdown or no options - use imported value as-is
+                    newRow[colName] = importedValue;
+                  }
                 } else {
                   newRow[colName] = '';
                 }
@@ -520,6 +542,69 @@ export default function ExcelCreator({ labourType, onFileCreated, onSaveAndClose
       });
 
       const result = await response.json();
+      
+      // Check HTTP status code - 400 means validation failed
+      if (!response.ok || !result.success) {
+        // Handle validation errors with detailed message
+        if (result.validationError || response.status === 400) {
+          const errorMsg = result.error || 'Validation failed';
+          const duplicateErrors = result.duplicateErrors || [];
+          const lockedColumnErrors = result.lockedColumnErrors || [];
+          const dropdownErrors = result.dropdownErrors || [];
+          const missingCols = result.missingColumns || [];
+          
+          let detailedError = `❌ FILE NOT SAVED - VALIDATION FAILED\n\n`;
+          detailedError += `Reason: ${errorMsg}\n\n`;
+          
+          // Show duplicate errors prominently with alert
+          if (duplicateErrors.length > 0) {
+            detailedError += `🚫 DUPLICATE VALUES FOUND IN UNIQUE COLUMNS:\n`;
+            duplicateErrors.forEach((err: string) => {
+              detailedError += `  • ${err}\n`;
+            });
+            detailedError += `\n⚠️ ACTION REQUIRED: Remove duplicate values before saving.\n\n`;
+            
+            // Show alert popup for duplicates
+            alert(`❌ DUPLICATE VALUES DETECTED!\n\n${duplicateErrors.map((err: string) => `• ${err}`).join('\n')}\n\nFile was NOT saved. Please fix duplicates and try again.`);
+          }
+          
+          // Show dropdown errors prominently with alert
+          if (dropdownErrors.length > 0) {
+            detailedError += `📋 INVALID DROPDOWN VALUES:\n`;
+            dropdownErrors.forEach((err: string) => {
+              detailedError += `  • ${err}\n`;
+            });
+            detailedError += `\n⚠️ ACTION REQUIRED: Use only allowed dropdown options.\n\n`;
+            
+            // Show alert popup for dropdown errors
+            alert(`❌ INVALID DROPDOWN VALUES DETECTED!\n\n${dropdownErrors.map((err: string) => `• ${err}`).join('\n')}\n\nFile was NOT saved. Please use only allowed options and try again.`);
+          }
+          
+          // Show locked column errors
+          if (lockedColumnErrors && lockedColumnErrors.length > 0) {
+            detailedError += `🔒 LOCKED COLUMN ERRORS:\n`;
+            lockedColumnErrors.forEach((err: string) => {
+              detailedError += `  • ${err}\n`;
+            });
+            detailedError += `\n`;
+          }
+          
+          if (missingCols.length > 0) {
+            detailedError += `Missing columns: ${missingCols.join(', ')}\n`;
+          }
+          
+          setMessage({ 
+            type: 'error', 
+            text: detailedError 
+          });
+          setSaving(false);
+          return; // Stop here - don't save the file
+        } else {
+          setMessage({ type: 'error', text: result.error || 'Failed to save Excel file' });
+          setSaving(false);
+          return;
+        }
+      }
 
       if (result.success) {
         // Clear currentEditingFileId after successful save so next save creates a new file
@@ -547,27 +632,6 @@ export default function ExcelCreator({ labourType, onFileCreated, onSaveAndClose
         // Call onSaveSuccess to refresh saved files list
         if (onSaveSuccess) {
           onSaveSuccess();
-        }
-      } else {
-        // Handle validation errors with detailed message
-        if (result.validationError) {
-          const errorMsg = result.error || 'Format validation failed';
-          const missingCols = result.missingColumns || [];
-          const formatCols = result.formatColumns || [];
-          const example = result.example || [];
-          
-          let detailedError = `${errorMsg}\n\n`;
-          if (missingCols.length > 0) {
-            detailedError += `Missing columns: ${missingCols.join(', ')}\n`;
-          }
-          detailedError += `\nRequired format columns:\n${formatCols.map((col: string, idx: number) => `${idx + 1}. ${col}`).join('\n')}`;
-          
-          setMessage({ 
-            type: 'error', 
-            text: detailedError 
-          });
-        } else {
-          setMessage({ type: 'error', text: result.error || 'Failed to save Excel file' });
         }
       }
     } catch (err: any) {
@@ -846,6 +910,26 @@ export default function ExcelCreator({ labourType, onFileCreated, onSaveAndClose
                         body: formData,
                     });
                     const result = await response.json();
+                    
+                    // Check HTTP status code - 400 means validation failed
+                    if (!response.ok || !result.success) {
+                        if (result.validationError || response.status === 400) {
+                            const duplicateErrors = result.duplicateErrors || [];
+                            const errorMsg = result.error || 'Validation failed';
+                            
+                            if (duplicateErrors.length > 0) {
+                                alert(`❌ DUPLICATE VALUES DETECTED!\n\n${duplicateErrors.map((err: string) => `• ${err}`).join('\n')}\n\nFile was NOT saved. Please fix duplicates and try again.`);
+                            } else {
+                                alert(`❌ VALIDATION FAILED\n\n${errorMsg}\n\nFile was NOT saved.`);
+                            }
+                            setSaving(false);
+                            return;
+                        }
+                        alert(`❌ ERROR\n\n${result.error || 'Failed to save file'}\n\nFile was NOT saved.`);
+                        setSaving(false);
+                        return;
+                    }
+                    
                     if (result.success) {
                         const wasEditing = !!currentEditingFileId;
                         setCurrentEditingFileId(undefined); // Clear so next save creates new file

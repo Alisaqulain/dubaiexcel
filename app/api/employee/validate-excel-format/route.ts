@@ -89,11 +89,11 @@ async function handleValidateExcelFormat(req: AuthenticatedRequest) {
       });
     }
 
-    // Get headers (first row)
-    const headers = (jsonData[0] as any[]) || [];
+    // Get headers (first row) - normalize them
+    const headers = ((jsonData[0] as any[]) || []).map((h: any) => String(h || '').trim());
     const formatColumns = (assignedFormat as any).columns.sort((a: any, b: any) => a.order - b.order);
-    const requiredColumns = formatColumns.filter((col: any) => col.required).map((col: any) => col.name);
-    const formatColumnNames = formatColumns.map((col: any) => col.name);
+    const requiredColumns = formatColumns.filter((col: any) => col.required).map((col: any) => col.name.trim());
+    const formatColumnNames = formatColumns.map((col: any) => col.name.trim());
 
     // Validation errors
     const errors: string[] = [];
@@ -131,7 +131,10 @@ async function handleValidateExcelFormat(req: AuthenticatedRequest) {
 
     dataRows.forEach((row: any[], rowIndex: number) => {
       formatColumns.forEach((formatCol: any) => {
-        const colIndex = headers.indexOf(formatCol.name);
+        // Normalize column name for matching (case-insensitive)
+        const colNameNormalized = formatCol.name.trim();
+        const colIndex = headers.findIndex((h: string) => h.trim().toLowerCase() === colNameNormalized.toLowerCase());
+        
         if (colIndex !== -1) {
           const cellValue = row[colIndex];
           
@@ -161,6 +164,41 @@ async function handleValidateExcelFormat(req: AuthenticatedRequest) {
         }
       });
     });
+
+    // Check for duplicate values in unique columns
+    const uniqueColumns = formatColumns.filter((col: any) => col.unique === true);
+    if (uniqueColumns.length > 0) {
+      uniqueColumns.forEach((col: any) => {
+        const colNameNormalized = col.name.trim();
+        const colIndex = headers.findIndex((h: string) => h.trim().toLowerCase() === colNameNormalized.toLowerCase());
+        
+        if (colIndex !== -1) {
+          const valueMap = new Map<string, number[]>();
+          
+          dataRows.forEach((row: any[], rowIndex: number) => {
+            const rawValue = row[colIndex];
+            const value = rawValue !== undefined && rawValue !== null ? String(rawValue).trim() : '';
+            
+            if (value !== '') {
+              const normalizedValue = value.toLowerCase();
+              if (!valueMap.has(normalizedValue)) {
+                valueMap.set(normalizedValue, []);
+              }
+              valueMap.get(normalizedValue)!.push(rowIndex + 2);
+            }
+          });
+          
+          valueMap.forEach((rowIndices, normalizedValue) => {
+            if (rowIndices.length > 1) {
+              const originalValue = dataRows[rowIndices[0] - 2]?.[colIndex] ? String(dataRows[rowIndices[0] - 2][colIndex]).trim() : normalizedValue;
+              dataErrors.push(
+                `Column "${col.name}" must be unique. Duplicate value "${originalValue}" found in rows: ${rowIndices.join(', ')}`
+              );
+            }
+          });
+        }
+      });
+    }
 
     // Combine all errors
     const allErrors = [...errors, ...dataErrors];

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import connectDB from '@/lib/mongodb';
 import { withAdmin, AuthenticatedRequest } from '@/lib/middleware';
 import CreatedExcelFile from '@/models/CreatedExcelFile';
+import ExcelFormat from '@/models/ExcelFormat';
 // COMMENTED OUT - Activity logging (not useable for now)
 // import { logActivity } from '@/lib/activityLogger';
 import * as XLSX from 'xlsx';
@@ -17,9 +18,9 @@ async function handleMergeCreatedExcelFiles(req: AuthenticatedRequest) {
     const body = await req.json();
     const { fileIds, mergedFilename } = body;
 
-    if (!fileIds || !Array.isArray(fileIds) || fileIds.length < 2) {
+    if (!fileIds || !Array.isArray(fileIds) || fileIds.length < 1) {
       return NextResponse.json(
-        { error: 'At least 2 file IDs are required' },
+        { error: 'At least 1 file ID is required' },
         { status: 400 }
       );
     }
@@ -30,9 +31,9 @@ async function handleMergeCreatedExcelFiles(req: AuthenticatedRequest) {
       _id: { $in: fileIds },
     }).select('+fileData'); // Explicitly include fileData
 
-    if (files.length < 2) {
+    if (files.length < 1) {
       return NextResponse.json(
-        { error: 'At least 2 valid files are required for merging' },
+        { error: 'At least 1 valid file is required for merging' },
         { status: 400 }
       );
     }
@@ -144,6 +145,198 @@ async function handleMergeCreatedExcelFiles(req: AuthenticatedRequest) {
       });
     });
 
+    // Check for unique column constraints - get all active formats and find unique columns
+    const activeFormats = await ExcelFormat.find({ active: true }).lean();
+    const uniqueColumns: string[] = [];
+    
+    // Find columns that are marked as unique in any active format
+    activeFormats.forEach((format: any) => {
+      if (format.columns && Array.isArray(format.columns)) {
+        format.columns.forEach((col: any) => {
+          if (col.unique === true && unifiedHeaders.includes(col.name)) {
+            if (!uniqueColumns.includes(col.name)) {
+              uniqueColumns.push(col.name);
+            }
+          }
+        });
+      }
+    });
+
+    // Handle unique columns - remove duplicates instead of failing
+    if (uniqueColumns.length > 0) {
+      const removedDuplicates: { [colName: string]: number } = {};
+      const seenValues: { [colName: string]: Set<string> } = {};
+      
+      // Initialize seen values sets for each unique column
+      uniqueColumns.forEach((colName: string) => {
+        seenValues[colName] = new Set<string>();
+        removedDuplicates[colName] = 0;
+      });
+      
+      // Filter out duplicate rows based on unique columns
+      // Keep first occurrence, remove subsequent duplicates
+      const deduplicatedRows: any[] = [];
+      
+      allRows.forEach((row: any, rowIndex: number) => {
+        let isDuplicate = false;
+        const duplicateColumns: string[] = [];
+        
+        // Check each unique column
+        uniqueColumns.forEach((colName: string) => {
+          // Normalize column name for matching
+          const colNameNormalized = colName.trim();
+          
+          // Try to find the column by exact match first, then case-insensitive
+          let value = row[colName];
+          if (value === undefined) {
+            const matchingKey = Object.keys(row).find(key => 
+              key.trim().toLowerCase() === colNameNormalized.toLowerCase()
+            );
+            value = matchingKey ? row[matchingKey] : undefined;
+          }
+          
+          const stringValue = value !== undefined && value !== null ? String(value).trim() : '';
+          
+          // Check all non-empty values (case-insensitive)
+          if (stringValue !== '') {
+            const normalizedValue = stringValue.toLowerCase();
+            
+            if (seenValues[colName].has(normalizedValue)) {
+              // This is a duplicate in this column
+              isDuplicate = true;
+              duplicateColumns.push(colName);
+              removedDuplicates[colName]++;
+            } else {
+              // First time seeing this value - add it to seen set
+              seenValues[colName].add(normalizedValue);
+            }
+          }
+        });
+        
+        // Only add row if it's not a duplicate in any unique column
+        if (!isDuplicate) {
+          deduplicatedRows.push(row);
+        } else {
+          // Log which columns had duplicates for this row
+          console.log(`Removed duplicate row ${rowIndex + 2}: duplicate values in columns: ${duplicateColumns.join(', ')}`);
+        }
+      });
+      
+      // Log removed duplicates
+      const totalRemoved = Object.values(removedDuplicates).reduce((sum, count) => sum + count, 0);
+      if (totalRemoved > 0) {
+        console.log(`⚠️ Removed ${totalRemoved} duplicate row(s) from unique columns during merge:`, removedDuplicates);
+        // Update allRows to use deduplicated rows
+        allRows.length = 0;
+        allRows.push(...deduplicatedRows);
+      } else {
+        console.log('✅ No duplicates found in unique columns');
+      }
+    }
+
+    // Validate dropdown columns - check if values match allowed options
+    const dropdownColumns: Array<{ name: string; options: string[]; optionsLower: string[] }> = [];
+    
+    // Find dropdown columns from active formats
+    activeFormats.forEach((format: any) => {
+      if (format.columns && Array.isArray(format.columns)) {
+        format.columns.forEach((col: any) => {
+          if (col.type === 'dropdown' && col.validation?.options && col.validation.options.length > 0) {
+            if (unifiedHeaders.includes(col.name)) {
+              // Check if we already have this column
+              const existingCol = dropdownColumns.find(dc => dc.name.toLowerCase() === col.name.toLowerCase());
+              if (!existingCol) {
+                dropdownColumns.push({
+                  name: col.name,
+                  options: col.validation.options.map((opt: string) => String(opt).trim()),
+                  optionsLower: col.validation.options.map((opt: string) => String(opt).trim().toLowerCase())
+                });
+              }
+            }
+          }
+        });
+      }
+    });
+
+    if (dropdownColumns.length > 0) {
+      console.log('Checking dropdown columns:', dropdownColumns);
+      const dropdownErrors: string[] = [];
+      
+      allRows.forEach((row: any, rowIndex: number) => {
+        dropdownColumns.forEach((col: any) => {
+          // Normalize column name for matching
+          const colNameNormalized = col.name.trim();
+          
+          // Try to find the column by exact match first, then case-insensitive
+          let value = row[col.name];
+          let columnKey = col.name;
+          if (value === undefined) {
+            const matchingKey = Object.keys(row).find(key => 
+              key.trim().toLowerCase() === colNameNormalized.toLowerCase()
+            );
+            if (matchingKey) {
+              value = row[matchingKey];
+              columnKey = matchingKey;
+            }
+          }
+          
+          const stringValue = value !== undefined && value !== null ? String(value).trim() : '';
+          
+          // Only validate non-empty values
+          if (stringValue !== '') {
+            const normalizedValue = stringValue.toLowerCase();
+            const optionIndex = col.optionsLower.indexOf(normalizedValue);
+            
+            if (optionIndex === -1) {
+              // Value doesn't match any option (case-insensitive)
+              // Find original options for display (case-sensitive)
+              const originalFormat = activeFormats.find((f: any) => 
+                f.columns?.some((c: any) => 
+                  c.type === 'dropdown' && 
+                  c.name.toLowerCase() === col.name.toLowerCase() &&
+                  c.validation?.options
+                )
+              );
+              const originalOptions = originalFormat?.columns?.find((c: any) => 
+                c.name.toLowerCase() === col.name.toLowerCase()
+              )?.validation?.options || col.options;
+              
+              dropdownErrors.push(
+                `Row ${rowIndex + 2}: Column "${col.name}" must be one of: ${originalOptions.join(', ')}. Found: "${stringValue}"`
+              );
+              console.error(`DROPDOWN VALIDATION FAILED: Column "${col.name}", Value "${stringValue}", Allowed: ${originalOptions.join(', ')}`);
+            } else {
+              // Value matches (case-insensitive) - normalize to exact case of defined option
+              const correctCaseValue = col.options[optionIndex];
+              if (stringValue !== correctCaseValue) {
+                // Update the row value to match the exact case of the option
+                row[columnKey] = correctCaseValue;
+                console.log(`Normalized dropdown value: "${stringValue}" -> "${correctCaseValue}" in column "${col.name}", row ${rowIndex + 2}`);
+              }
+            }
+          }
+        });
+      });
+      
+      if (dropdownErrors.length > 0) {
+        // Log for debugging
+        console.error('=== DROPDOWN VALIDATION FAILED ===');
+        console.error('Dropdown errors:', dropdownErrors);
+        console.error('Dropdown columns checked:', dropdownColumns);
+        
+        // Return error - merge will NOT proceed
+        return NextResponse.json({
+          success: false,
+          error: `Cannot merge files: Invalid dropdown values found. Merge was NOT completed.`,
+          validationError: true,
+          dropdownErrors,
+          message: `Found ${dropdownErrors.length} invalid dropdown value(s). Please fix the values and try again.`,
+        }, { status: 400 });
+      } else {
+        console.log('✅ Dropdown validation passed - all values match allowed options');
+      }
+    }
+
     // Calculate attendance analysis
     const attendanceColumn = unifiedHeaders.find(h => {
       const hLower = h.toLowerCase().trim();
@@ -244,6 +437,13 @@ async function handleMergeCreatedExcelFiles(req: AuthenticatedRequest) {
     // Ensure filename has .xlsx extension
     const finalFilename = customFilename.endsWith('.xlsx') ? customFilename : `${customFilename}.xlsx`;
 
+    // Increment merge count for all source files
+    const sourceFileIds = files.map(f => f._id);
+    await CreatedExcelFile.updateMany(
+      { _id: { $in: sourceFileIds } },
+      { $inc: { mergeCount: 1 } }
+    );
+
     const mergedFile = await CreatedExcelFile.create({
       filename: systemFilename,
       originalFilename: finalFilename,
@@ -254,8 +454,9 @@ async function handleMergeCreatedExcelFiles(req: AuthenticatedRequest) {
       createdByName: 'Admin',
       createdByEmail: req.user?.email || 'admin',
       isMerged: true,
-      mergedFrom: files.map(f => f._id),
+      mergedFrom: sourceFileIds,
       mergedDate: new Date(),
+      mergeCount: 0, // New merged file starts with 0 (will increment when used in future merges)
     });
 
     // DO NOT mark original files as merged - keep them visible
@@ -276,9 +477,25 @@ async function handleMergeCreatedExcelFiles(req: AuthenticatedRequest) {
     //   },
     // });
 
+    // Calculate how many duplicates were removed
+    const originalRowCount = fileDataArray.reduce((sum, file) => sum + file.rows.length, 0);
+    const finalRowCount = allRows.length;
+    const duplicatesRemoved = originalRowCount - finalRowCount;
+    
+    const fileCount = files.length;
+    let successMessage = fileCount === 1 
+      ? `Successfully created merged file from ${fileCount} file with ${allRows.length} rows`
+      : `Successfully merged ${fileCount} files into one file with ${allRows.length} rows`;
+    if (duplicatesRemoved > 0) {
+      successMessage += `. Removed ${duplicatesRemoved} duplicate row(s) from unique columns.`;
+    }
+    if (attendanceStats) {
+      successMessage += ` Present: ${attendanceStats.present}, Absent: ${attendanceStats.absent}`;
+    }
+    
     return NextResponse.json({
       success: true,
-      message: `Successfully merged ${files.length} files into one file with ${allRows.length} rows${attendanceStats ? `. Present: ${attendanceStats.present}, Absent: ${attendanceStats.absent}` : ''}`,
+      message: successMessage,
       data: {
         mergedFile: {
           id: mergedFile._id,
@@ -287,6 +504,9 @@ async function handleMergeCreatedExcelFiles(req: AuthenticatedRequest) {
           labourType: mergedFile.labourType,
         },
         mergedCount: files.length,
+        originalRowCount,
+        finalRowCount,
+        duplicatesRemoved,
         attendanceAnalysis: attendanceStats,
       },
     });

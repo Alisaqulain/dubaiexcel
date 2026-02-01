@@ -76,14 +76,22 @@ async function handleUpdateFormat(
     if (name) updateData.name = name;
     if (description !== undefined) updateData.description = description;
     if (columns && Array.isArray(columns)) {
-      updateData.columns = columns.map((col: any, index: number) => ({
-        name: col.name,
-        type: col.type || 'text',
-        required: col.required || false,
-        editable: col.editable !== undefined ? col.editable : true, // Default to editable
-        validation: col.validation || {},
-        order: col.order !== undefined ? col.order : index,
-      }));
+      updateData.columns = columns.map((col: any, index: number) => {
+        const columnData: any = {
+          name: col.name,
+          type: col.type || 'text',
+          required: col.required === true, // Explicit boolean
+          editable: col.editable !== false, // Default to true if not explicitly false
+          unique: col.unique === true, // Explicit boolean - only true if explicitly set to true
+          validation: col.validation || {},
+          order: col.order !== undefined ? col.order : index,
+        };
+        // Ensure unique is always explicitly set (even if false) so MongoDB stores it
+        if (col.unique === undefined || col.unique === null) {
+          columnData.unique = false;
+        }
+        return columnData;
+      });
     }
     if (assignedTo !== undefined) {
       // Convert string IDs to ObjectIds, handle empty arrays
@@ -104,9 +112,20 @@ async function handleUpdateFormat(
 
     // Update the document directly
     Object.assign(existingFormat, updateData);
+    
+    // Explicitly mark columns as modified to ensure all fields (including unique: false) are saved
+    existingFormat.markModified('columns');
+    
     await existingFormat.save();
 
-    const format = await ExcelFormat.findById(params.id);
+    // Fetch the updated format to ensure all fields are included
+    const format = await ExcelFormat.findById(params.id).lean();
+
+    // Log to verify unique property is saved
+    console.log('Format updated - columns:', format?.columns?.map((col: any) => ({ 
+      name: col.name, 
+      unique: col.unique 
+    })));
 
     return NextResponse.json({
       success: true,

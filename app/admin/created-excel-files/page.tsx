@@ -44,6 +44,7 @@ interface CreatedExcelFile {
   isMerged?: boolean;
   mergedFrom?: string[];
   mergedDate?: string;
+  mergeCount?: number; // Number of times this file has been used in merges
   createdAt: string;
 }
 
@@ -60,6 +61,11 @@ function CreatedExcelFilesComponent() {
   const [fileAnalyses, setFileAnalyses] = useState<{ [fileId: string]: FileAnalysis }>({});
   const [expandedFileId, setExpandedFileId] = useState<string | null>(null);
   const [mergeAttendanceStats, setMergeAttendanceStats] = useState<AttendanceStats | null>(null);
+  const [showMergeFilenameModal, setShowMergeFilenameModal] = useState(false);
+  const [mergeFilename, setMergeFilename] = useState('');
+  const [activeTab, setActiveTab] = useState<'original' | 'merged'>('original'); // Tab to filter files
+  const [viewingFileId, setViewingFileId] = useState<string | null>(null);
+  const [fileData, setFileData] = useState<any[]>([]);
 
   useEffect(() => {
     fetchFiles();
@@ -79,7 +85,16 @@ function CreatedExcelFilesComponent() {
       });
       const result = await response.json();
       if (result.success) {
-        setFiles(result.data || []);
+        // Ensure mergeCount is set for all files (default to 0 if missing)
+        const filesWithMergeCount = (result.data || []).map((file: any) => ({
+          ...file,
+          mergeCount: file.mergeCount ?? 0,
+        }));
+        console.log('Fetched files with mergeCount:', filesWithMergeCount.map((f: any) => ({ 
+          filename: f.originalFilename, 
+          mergeCount: f.mergeCount 
+        })));
+        setFiles(filesWithMergeCount);
       } else {
         setMessage({ type: 'error', text: result.error || 'Failed to fetch files' });
       }
@@ -91,10 +106,7 @@ function CreatedExcelFilesComponent() {
   };
 
   const handleToggleSelect = (fileId: string) => {
-    // Don't allow selecting merged files for merging
-    const file = files.find(f => f._id === fileId);
-    if (file?.isMerged) return;
-
+    // Allow selecting all files (including merged) for deletion
     setSelectedFiles(prev =>
       prev.includes(fileId)
         ? prev.filter(id => id !== fileId)
@@ -185,53 +197,117 @@ function CreatedExcelFilesComponent() {
     }
   };
 
+  const handleMergeClick = () => {
+    // Allow merging any files (original or merged) - need at least 1 file
+    const mergeableFiles = files.filter(f => selectedFiles.includes(f._id));
+    
+    if (mergeableFiles.length < 1) {
+      setMessage({ type: 'error', text: 'Please select at least 1 file to merge' });
+      return;
+    }
+
+    // Show filename input modal
+    setMergeFilename('');
+    setShowMergeFilenameModal(true);
+  };
+
   const handleMerge = async () => {
-    if (selectedFiles.length < 2) {
-      setMessage({ type: 'error', text: 'Please select at least 2 files to merge' });
+    // Allow merging any files (original or merged) - need at least 1 file
+    const mergeableFiles = files.filter(f => selectedFiles.includes(f._id));
+    
+    if (mergeableFiles.length < 1) {
+      setMessage({ type: 'error', text: 'Please select at least 1 file to merge' });
       return;
     }
 
     // Check if all selected files have the same labour type (warning, not error)
-    const selectedFileObjects = files.filter(f => selectedFiles.includes(f._id));
-    const labourTypes = Array.from(new Set(selectedFileObjects.map(f => f.labourType)));
+    const labourTypes = Array.from(new Set(mergeableFiles.map(f => f.labourType)));
     if (labourTypes.length > 1) {
       if (!confirm(`Warning: Selected files have different labour types (${labourTypes.join(', ')}). They will still be merged. Continue?`)) {
         return;
       }
     }
 
-    if (!confirm(`Are you sure you want to merge ${selectedFiles.length} files?`)) {
-      return;
-    }
+    // Close modal
+    setShowMergeFilenameModal(false);
 
     setMerging(true);
     setMessage(null);
 
     try {
+      // Only send mergeable file IDs (exclude merged files)
+      const mergeableFileIds = mergeableFiles.map(f => f._id);
+      
       const response = await fetch('/api/admin/created-excel-files/merge', {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ fileIds: selectedFiles }),
+        body: JSON.stringify({ 
+          fileIds: mergeableFileIds,
+          mergedFilename: mergeFilename.trim() || undefined, // Send custom filename if provided
+        }),
       });
 
       const result = await response.json();
+      
+      // Check HTTP status - 400 means validation failed
+      if (!response.ok || !result.success) {
+        if (result.validationError || response.status === 400) {
+          const duplicateErrors = result.duplicateErrors || [];
+          const dropdownErrors = result.dropdownErrors || [];
+          const errorMsg = result.error || 'Validation failed';
+          
+          if (duplicateErrors.length > 0) {
+            const duplicateMsg = `❌ MERGE FAILED - DUPLICATE VALUES DETECTED!\n\n${duplicateErrors.map((err: string) => `• ${err}`).join('\n')}\n\nFiles were NOT merged. Please remove duplicates and try again.`;
+            alert(duplicateMsg);
+            setMessage({ 
+              type: 'error', 
+              text: `Merge failed: Duplicate values found in unique columns. ${duplicateErrors.length} error(s).` 
+            });
+          } else if (dropdownErrors.length > 0) {
+            const dropdownMsg = `❌ MERGE FAILED - INVALID DROPDOWN VALUES DETECTED!\n\n${dropdownErrors.map((err: string) => `• ${err}`).join('\n')}\n\nFiles were NOT merged. Please use only allowed dropdown options and try again.`;
+            alert(dropdownMsg);
+            setMessage({ 
+              type: 'error', 
+              text: `Merge failed: Invalid dropdown values found. ${dropdownErrors.length} error(s).` 
+            });
+          } else {
+            alert(`❌ MERGE FAILED\n\n${errorMsg}\n\nFiles were NOT merged.`);
+            setMessage({ type: 'error', text: errorMsg });
+          }
+          setMergeAttendanceStats(null);
+          setMerging(false);
+          return; // Stop here - don't merge
+        } else {
+          alert(`❌ MERGE FAILED\n\n${result.error || 'Failed to merge files'}\n\nFiles were NOT merged.`);
+          setMessage({ type: 'error', text: result.error || 'Failed to merge files' });
+          setMergeAttendanceStats(null);
+          setMerging(false);
+          return;
+        }
+      }
+      
       if (result.success) {
         let successMessage = result.message || 'Successfully merged files';
         
         // Store attendance stats for display
         if (result.data?.attendanceAnalysis) {
           setMergeAttendanceStats(result.data.attendanceAnalysis);
-          const stats = result.data.attendanceAnalysis;
-          successMessage = `Successfully merged ${selectedFiles.length} files into one file with ${result.data.mergedFile.rowCount} rows.`;
         } else {
           setMergeAttendanceStats(null);
         }
         
+        // Show message about duplicates removed if any
+        if (result.data?.duplicatesRemoved > 0) {
+          successMessage += `\n\n⚠️ Note: ${result.data.duplicatesRemoved} duplicate row(s) were automatically removed from unique columns during merge to prevent duplicates.`;
+          alert(`✅ Merge Successful!\n\n${successMessage}`);
+        }
+        
         setMessage({ type: 'success', text: successMessage });
         setSelectedFiles([]);
+        setMergeFilename(''); // Clear filename after successful merge
         fetchFiles();
         
         // Auto-analyze the merged file if attendance data exists
@@ -240,9 +316,6 @@ function CreatedExcelFilesComponent() {
             handleAnalyze(result.data.mergedFile.id);
           }, 1000);
         }
-      } else {
-        setMessage({ type: 'error', text: result.error || 'Failed to merge files' });
-        setMergeAttendanceStats(null);
       }
     } catch (err: any) {
       console.error('Merge error:', err);
@@ -250,6 +323,11 @@ function CreatedExcelFilesComponent() {
     } finally {
       setMerging(false);
     }
+  };
+
+  const handleCancelMerge = () => {
+    setShowMergeFilenameModal(false);
+    setMergeFilename('');
   };
 
   const handleDeleteSelected = async () => {
@@ -331,6 +409,37 @@ function CreatedExcelFilesComponent() {
     );
   }
 
+  const handleViewFile = async (fileId: string) => {
+    try {
+      const response = await fetch(`/api/admin/created-excel-files/${fileId}/view`, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+        },
+      });
+      const result = await response.json();
+      if (result.success) {
+        setFileData(result.data.data || []);
+        setViewingFileId(fileId);
+      } else {
+        setMessage({ type: 'error', text: result.error || 'Failed to load file' });
+      }
+    } catch (err: any) {
+      setMessage({ type: 'error', text: err.message || 'Failed to load file' });
+    }
+  };
+
+  // Filter files based on active tab, but allow cross-tab selection
+  const filteredFiles = files.filter(file => {
+    if (activeTab === 'merged') {
+      return file.isMerged === true;
+    } else {
+      return file.isMerged !== true;
+    }
+  });
+
+  // Get all files for merge operations (across both tabs)
+  const allFilesForMerge = files;
+
   return (
     <div className="min-h-screen bg-gray-50 p-6">
       <div className="max-w-7xl mx-auto">
@@ -338,8 +447,8 @@ function CreatedExcelFilesComponent() {
           <h1 className="text-3xl font-bold">Created Excel Files</h1>
           <div className="flex gap-2">
             <button
-              onClick={handleMerge}
-              disabled={merging || selectedFiles.length < 2}
+              onClick={handleMergeClick}
+              disabled={merging || selectedFiles.length < 1}
               className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50"
             >
               {merging ? 'Merging...' : `Merge Selected (${selectedFiles.length})`}
@@ -352,6 +461,47 @@ function CreatedExcelFilesComponent() {
               {deleting ? 'Deleting...' : `Delete Selected (${selectedFiles.length})`}
             </button>
           </div>
+        </div>
+
+        {/* Tabs to separate original and merged files */}
+        <div className="mb-4 flex gap-2 border-b border-gray-200">
+          <button
+            onClick={() => {
+              setActiveTab('original');
+              // Don't clear selection - allow cross-tab selection
+            }}
+            className={`px-4 py-2 font-medium ${
+              activeTab === 'original'
+                ? 'border-b-2 border-blue-600 text-blue-600'
+                : 'text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            Original Files ({files.filter(f => !f.isMerged).length})
+          </button>
+          <button
+            onClick={() => {
+              setActiveTab('merged');
+              // Don't clear selection - allow cross-tab selection
+            }}
+            className={`px-4 py-2 font-medium ${
+              activeTab === 'merged'
+                ? 'border-b-2 border-blue-600 text-blue-600'
+                : 'text-gray-500 hover:text-gray-700'
+            }`}
+          >
+            Merged Files ({files.filter(f => f.isMerged).length})
+          </button>
+          {selectedFiles.length > 0 && (
+            <div className="ml-auto flex items-center gap-2 text-sm text-gray-600">
+              <span>Selected: {selectedFiles.length} file(s)</span>
+              <button
+                onClick={() => setSelectedFiles([])}
+                className="text-red-600 hover:text-red-800 text-xs underline"
+              >
+                Clear Selection
+              </button>
+            </div>
+          )}
         </div>
 
         {/* Filter */}
@@ -442,15 +592,27 @@ function CreatedExcelFilesComponent() {
                 <th className="px-6 py-3 text-left">
                   <input
                     type="checkbox"
-                    checked={selectedFiles.length === files.filter(f => !f.isMerged).length && files.filter(f => !f.isMerged).length > 0}
+                    checked={filteredFiles.length > 0 && filteredFiles.every(f => selectedFiles.includes(f._id))}
                     onChange={(e) => {
-                      const selectableFiles = files.filter(f => !f.isMerged);
                       if (e.target.checked) {
-                        setSelectedFiles(selectableFiles.map(f => f._id));
+                        // Add all files from current tab to selection (don't remove files from other tab)
+                        const currentTabFileIds = filteredFiles.map(f => f._id);
+                        setSelectedFiles(prev => {
+                          const newSelection = [...prev];
+                          currentTabFileIds.forEach(id => {
+                            if (!newSelection.includes(id)) {
+                              newSelection.push(id);
+                            }
+                          });
+                          return newSelection;
+                        });
                       } else {
-                        setSelectedFiles([]);
+                        // Remove only files from current tab from selection
+                        const currentTabFileIds = filteredFiles.map(f => f._id);
+                        setSelectedFiles(prev => prev.filter(id => !currentTabFileIds.includes(id)));
                       }
                     }}
+                    title="Select all files in this tab"
                   />
                 </th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Filename</th>
@@ -463,14 +625,14 @@ function CreatedExcelFilesComponent() {
               </tr>
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
-              {files.length === 0 ? (
+              {filteredFiles.length === 0 ? (
                 <tr>
                   <td colSpan={8} className="px-6 py-4 text-center text-gray-500">
-                    No files found
+                    No {activeTab === 'merged' ? 'merged' : 'original'} files found
                   </td>
                 </tr>
               ) : (
-                files.map((file) => (
+                filteredFiles.map((file) => (
                   <>
                   <tr key={file._id} className="hover:bg-gray-50">
                     <td className="px-6 py-4">
@@ -478,10 +640,30 @@ function CreatedExcelFilesComponent() {
                         type="checkbox"
                         checked={selectedFiles.includes(file._id)}
                         onChange={() => handleToggleSelect(file._id)}
-                        disabled={file.isMerged}
+                        title={file.isMerged ? 'Merged file - can be merged again' : 'Original file'}
                       />
                     </td>
-                    <td className="px-6 py-4 text-sm text-gray-900">{file.originalFilename}</td>
+                    <td className="px-6 py-4 text-sm text-gray-900">
+                      <div className="flex items-center gap-2">
+                        <span>{file.originalFilename}</span>
+                        {(file.mergeCount ?? 0) > 0 && (
+                          <span 
+                            className="flex items-center gap-0.5" 
+                            title={`This file has been used in ${file.mergeCount} merge operation(s)`}
+                          >
+                            {Array.from({ length: file.mergeCount ?? 0 }).map((_, i) => (
+                              <span 
+                                key={i} 
+                                className="text-green-600 font-bold" 
+                                style={{ fontSize: '20px', lineHeight: '1' }}
+                              >
+                                ✓
+                              </span>
+                            ))}
+                          </span>
+                        )}
+                      </div>
+                    </td>
                     <td className="px-6 py-4 text-sm text-gray-900">
                       <div>{getCreatorName(file)}</div>
                       <div className="text-xs text-gray-500">{getCreatorEmail(file)}</div>
@@ -508,6 +690,13 @@ function CreatedExcelFilesComponent() {
                     </td>
                     <td className="px-6 py-4 text-sm">
                       <div className="flex gap-2">
+                        <button
+                          onClick={() => handleViewFile(file._id)}
+                          className="text-green-600 hover:text-green-800"
+                          title="View Excel file"
+                        >
+                          Show
+                        </button>
                         <button
                           onClick={() => handleAnalyze(file._id)}
                           disabled={analyzingFileId === file._id}
@@ -604,7 +793,100 @@ function CreatedExcelFilesComponent() {
             </tbody>
           </table>
         </div>
+
+        {/* View File Modal */}
+        {viewingFileId && fileData.length > 0 && (
+          <div className="bg-white rounded-lg shadow p-6 mt-6">
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="text-xl font-semibold">View Excel File Data</h2>
+              <button
+                onClick={() => {
+                  setViewingFileId(null);
+                  setFileData([]);
+                }}
+                className="px-4 py-2 text-gray-600 hover:text-gray-800 border border-gray-300 rounded-md"
+              >
+                Close
+              </button>
+            </div>
+            <div className="overflow-x-auto max-h-96 overflow-y-auto">
+              <table className="min-w-full divide-y divide-gray-200">
+                <thead className="bg-gray-50 sticky top-0">
+                  <tr>
+                    {Object.keys(fileData[0] || {}).map((key) => (
+                      <th key={key} className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
+                        {key}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="bg-white divide-y divide-gray-200">
+                  {fileData.map((row, idx) => (
+                    <tr key={idx} className="hover:bg-gray-50">
+                      {Object.values(row).map((value: any, colIdx) => (
+                        <td key={colIdx} className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                          {value || ''}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
       </div>
+
+      {/* Merge Filename Modal */}
+      {showMergeFilenameModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg shadow-xl p-6 max-w-md w-full mx-4">
+            <h2 className="text-2xl font-bold mb-4">Enter Merged File Name</h2>
+            <p className="text-gray-600 mb-4">
+              Enter a custom name for the merged file. If left empty, a default name will be generated.
+            </p>
+            <div className="mb-4">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                File Name (without extension)
+              </label>
+              <input
+                type="text"
+                value={mergeFilename}
+                onChange={(e) => setMergeFilename(e.target.value)}
+                placeholder="e.g., merged_attendance_report_january"
+                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                autoFocus
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    handleMerge();
+                  } else if (e.key === 'Escape') {
+                    handleCancelMerge();
+                  }
+                }}
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                The file will be saved as: {mergeFilename.trim() || 'auto-generated-name'}.xlsx
+              </p>
+            </div>
+            <div className="flex gap-2 justify-end">
+              <button
+                onClick={handleCancelMerge}
+                className="px-4 py-2 bg-gray-300 text-gray-700 rounded-md hover:bg-gray-400"
+                disabled={merging}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleMerge}
+                className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50"
+                disabled={merging}
+              >
+                {merging ? 'Merging...' : 'Merge Files'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

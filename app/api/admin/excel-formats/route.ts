@@ -48,14 +48,22 @@ async function handleCreateFormat(req: AuthenticatedRequest) {
     }
 
     // Validate columns
-    const validatedColumns = columns.map((col: any, index: number) => ({
-      name: col.name,
-      type: col.type || 'text',
-      required: col.required || false,
-      editable: col.editable !== undefined ? col.editable : true, // Default to editable
-      validation: col.validation || {},
-      order: col.order !== undefined ? col.order : index,
-    }));
+    const validatedColumns = columns.map((col: any, index: number) => {
+      const columnData: any = {
+        name: col.name,
+        type: col.type || 'text',
+        required: col.required === true, // Explicit boolean
+        editable: col.editable !== false, // Default to true if not explicitly false
+        unique: col.unique === true, // Explicit boolean - only true if explicitly set to true
+        validation: col.validation || {},
+        order: col.order !== undefined ? col.order : index,
+      };
+      // Ensure unique is always explicitly set (even if false) so MongoDB stores it
+      if (col.unique === undefined || col.unique === null) {
+        columnData.unique = false;
+      }
+      return columnData;
+    });
 
     const format = await ExcelFormat.create({
       name,

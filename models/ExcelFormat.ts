@@ -3,19 +3,20 @@ import mongoose, { Schema, Document } from 'mongoose';
 export interface IExcelFormat extends Document {
   name: string;
   description?: string;
-  columns: Array<{
-    name: string;
-    type: 'text' | 'number' | 'date' | 'email' | 'dropdown';
-    required: boolean;
-    editable: boolean; // true = editable by users, false = locked (admin only)
-    validation?: {
-      min?: number;
-      max?: number;
-      pattern?: string;
-      options?: string[]; // For dropdown type
-    };
-    order: number;
-  }>;
+    columns: Array<{
+      name: string;
+      type: 'text' | 'number' | 'date' | 'email' | 'dropdown';
+      required: boolean;
+      editable: boolean; // true = editable by users, false = locked (admin only)
+      unique?: boolean; // true = column values must be unique
+      validation?: {
+        min?: number;
+        max?: number;
+        pattern?: string;
+        options?: string[]; // For dropdown type
+      };
+      order: number;
+    }>;
   assignedTo: mongoose.Types.ObjectId[]; // Employee IDs or User IDs
   assignedToType: 'employee' | 'user' | 'all' | 'none';
   createdBy: mongoose.Types.ObjectId;
@@ -37,6 +38,7 @@ const ExcelFormatSchema = new Schema<IExcelFormat>({
       },
       required: { type: Boolean, default: false },
       editable: { type: Boolean, default: true }, // Default to editable
+      unique: { type: Boolean, default: false }, // Default to not unique
       validation: {
         min: { type: Number },
         max: { type: Number },

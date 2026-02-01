@@ -11,6 +11,7 @@ interface Column {
   type: 'text' | 'number' | 'date' | 'email' | 'dropdown';
   required: boolean;
   editable: boolean; // true = editable by users, false = read-only
+  unique?: boolean; // true = column values must be unique
   validation?: {
     min?: number;
     max?: number;
@@ -64,6 +65,7 @@ function ExcelFormatsComponent() {
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploadResult, setUploadResult] = useState<any>(null);
   const [importedRowData, setImportedRowData] = useState<Record<string, any>[]>([]); // Store imported row data
+  const [dropdownInputs, setDropdownInputs] = useState<{ [key: number]: string }>({}); // Track raw dropdown input values
   const [formData, setFormData] = useState({
     name: '',
     description: '',
@@ -133,15 +135,154 @@ function ExcelFormatsComponent() {
         type: 'text',
         required: false,
         editable: true, // Default to editable
+        unique: false, // Default to not unique
         order: formData.columns.length,
       }],
     });
   };
 
+  // Helper function to convert value to target type
+  const convertValueToType = (value: any, targetType: string, originalType?: string): any => {
+    if (!value || value === '') return '';
+    
+    const stringValue = String(value).trim();
+    
+    switch (targetType) {
+      case 'date':
+        // Try to parse various date formats
+        if (originalType === 'date') {
+          // Already a date, try to preserve it
+          // Check if it's in YYYY-MM-DD format (HTML date input format)
+          if (/^\d{4}-\d{2}-\d{2}$/.test(stringValue)) {
+            return stringValue;
+          }
+        }
+        
+        // Check if it's an Excel serial date number (e.g., 45117)
+        const excelSerial = parseFloat(stringValue);
+        if (!isNaN(excelSerial) && excelSerial > 0 && excelSerial < 1000000) {
+          // Excel serial date: days since January 1, 1900
+          // Excel epoch starts on 1900-01-01, but Excel incorrectly treats 1900 as a leap year
+          const excelEpoch = new Date(1899, 11, 30); // December 30, 1899
+          const date = new Date(excelEpoch.getTime() + excelSerial * 24 * 60 * 60 * 1000);
+          if (!isNaN(date.getTime())) {
+            const year = date.getFullYear();
+            const month = String(date.getMonth() + 1).padStart(2, '0');
+            const day = String(date.getDate()).padStart(2, '0');
+            return `${year}-${month}-${day}`;
+          }
+        }
+        
+        // Try common date formats
+        const dateFormats = [
+          /^\d{4}-\d{2}-\d{2}$/, // YYYY-MM-DD
+          /^\d{2}\/\d{2}\/\d{4}$/, // MM/DD/YYYY
+          /^\d{2}-\d{2}-\d{4}$/, // MM-DD-YYYY
+          /^\d{4}\/\d{2}\/\d{2}$/, // YYYY/MM/DD
+          /^\d{1,2}\/\d{1,2}\/\d{4}$/, // M/D/YYYY or MM/DD/YYYY
+          /^\d{1,2}-\d{1,2}-\d{4}$/, // M-D-YYYY or MM-DD-YYYY
+        ];
+        
+        // Check if it's already in a valid date format
+        for (const format of dateFormats) {
+          if (format.test(stringValue)) {
+            // Convert to YYYY-MM-DD format for HTML date input
+            const parts = stringValue.split(/[\/\-]/);
+            if (parts.length === 3) {
+              // Determine format based on first part length
+              if (parts[0].length === 4) {
+                // YYYY-MM-DD or YYYY/MM/DD
+                return `${parts[0]}-${parts[1].padStart(2, '0')}-${parts[2].padStart(2, '0')}`;
+              } else {
+                // MM/DD/YYYY or MM-DD-YYYY (assume US format)
+                const month = parts[0].padStart(2, '0');
+                const day = parts[1].padStart(2, '0');
+                const year = parts[2];
+                return `${year}-${month}-${day}`;
+              }
+            }
+            return stringValue;
+          }
+        }
+        
+        // Try parsing as date (handles various formats)
+        const parsedDate = new Date(stringValue);
+        if (!isNaN(parsedDate.getTime()) && parsedDate.getFullYear() > 1900 && parsedDate.getFullYear() < 2100) {
+          // Valid date, format as YYYY-MM-DD
+          const year = parsedDate.getFullYear();
+          const month = String(parsedDate.getMonth() + 1).padStart(2, '0');
+          const day = String(parsedDate.getDate()).padStart(2, '0');
+          return `${year}-${month}-${day}`;
+        }
+        
+        // If can't parse, preserve original value (don't clear it)
+        // User can manually fix if needed, but at least data isn't lost
+        console.warn(`Could not convert "${stringValue}" to date format, preserving original value`);
+        return stringValue;
+        
+      case 'number':
+        // Try to extract number from string
+        if (originalType === 'number') {
+          return stringValue;
+        }
+        // Remove non-numeric characters except decimal point and minus sign
+        const cleaned = stringValue.replace(/[^\d.\-]/g, '');
+        const numValue = parseFloat(cleaned);
+        if (!isNaN(numValue)) {
+          return numValue.toString();
+        }
+        // If can't parse, preserve original value
+        console.warn(`Could not convert "${stringValue}" to number, preserving original value`);
+        return stringValue;
+        
+      case 'email':
+        // Keep as is, validation will happen later
+        return stringValue;
+        
+      case 'text':
+      case 'dropdown':
+      default:
+        // Text and dropdown keep as string
+        return stringValue;
+    }
+  };
+
   const updateColumn = (index: number, field: string, value: any) => {
     const newColumns = [...formData.columns];
-    newColumns[index] = { ...newColumns[index], [field]: value };
+    const oldColumn = newColumns[index];
+    const updatedColumn = { ...oldColumn, [field]: value };
+    
+    // Ensure unique is always a boolean (not undefined)
+    if (field === 'unique') {
+      updatedColumn.unique = value === true;
+    }
+    
+    // If type is changing, convert existing data
+    if (field === 'type' && value !== oldColumn.type && importedRowData.length > 0) {
+      const columnName = oldColumn.name;
+      const newType = value;
+      const oldType = oldColumn.type;
+      
+      // Convert all row data for this column
+      const convertedRowData = importedRowData.map(row => {
+        const newRow = { ...row };
+        if (newRow[columnName] !== undefined) {
+          newRow[columnName] = convertValueToType(newRow[columnName], newType, oldType);
+        }
+        return newRow;
+      });
+      
+      setImportedRowData(convertedRowData);
+      console.log(`Converted column "${columnName}" from ${oldType} to ${newType}`, convertedRowData);
+    }
+    
+    newColumns[index] = updatedColumn;
     setFormData({ ...formData, columns: newColumns });
+    
+    // Log for debugging
+    if (field === 'unique') {
+      console.log(`Column ${index} (${newColumns[index].name}) unique updated to:`, value, 'Type:', typeof value);
+    }
   };
 
   const removeColumn = (index: number) => {
@@ -541,6 +682,7 @@ function ExcelFormatsComponent() {
               type: 'text' as const, // All columns as text type
               required: required,
               editable: true, // Default to editable (admin can change in form)
+              unique: false, // Default to not unique
               validation: {},
               order: index,
             };
@@ -599,12 +741,25 @@ function ExcelFormatsComponent() {
           'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(formData),
+        body: JSON.stringify({
+          ...formData,
+          columns: formData.columns.map(col => ({
+            ...col,
+            unique: col.unique === true, // Ensure it's always a boolean
+          })),
+        }),
       });
 
       const result = await response.json();
       if (result.success) {
         const formatId = result.data._id || result.data.id;
+        
+        // Log the saved format to verify unique property is saved
+        console.log('Format saved successfully:', result.data);
+        console.log('Columns with unique property:', result.data.columns?.map((col: any) => ({ 
+          name: col.name, 
+          unique: col.unique 
+        })));
         
         // If we have imported row data and this is a new format, save it
         if (!editingFormat && importedRowData.length > 0 && formatId) {
@@ -631,6 +786,7 @@ function ExcelFormatsComponent() {
         }
         
         setShowForm(false);
+        setDropdownInputs({}); // Clear dropdown inputs
         setEditingFormat(null);
         setImportedRowData([]); // Clear imported data
         setFormData({
@@ -652,17 +808,42 @@ function ExcelFormatsComponent() {
 
   const handleEdit = (format: ExcelFormat) => {
     setEditingFormat(format);
+    // Initialize dropdown inputs from format columns
+    const dropdownInputsMap: { [key: number]: string } = {};
+    format.columns.forEach((col, index) => {
+      if (col.type === 'dropdown' && col.validation?.options) {
+        dropdownInputsMap[index] = col.validation.options.join(', ');
+      }
+    });
+    setDropdownInputs(dropdownInputsMap);
     setImportedRowData([]); // Clear imported data when editing
+    
+    // Log the format being edited to debug
+    console.log('Editing format:', format);
+    console.log('Format columns:', format.columns.map((col: any) => ({ 
+      name: col.name, 
+      unique: col.unique,
+      uniqueType: typeof col.unique 
+    })));
+    
     setFormData({
       name: format.name,
       description: format.description || '',
       columns: format.columns.map(col => ({
         ...col,
         editable: col.editable !== undefined ? col.editable : true, // Ensure editable property exists
+        unique: col.unique === true ? true : false, // Explicitly set to false if not true (handles undefined, null, false)
       })),
       assignedToType: format.assignedToType,
       assignedTo: format.assignedTo.map(id => String(id)), // Ensure IDs are strings
     });
+    
+    // Log the form data after setting
+    console.log('Form data columns:', formData.columns.map((col: any) => ({ 
+      name: col.name, 
+      unique: col.unique 
+    })));
+    
     setShowForm(true);
   };
 
@@ -835,6 +1016,7 @@ function ExcelFormatsComponent() {
               onClick={() => {
                 setShowForm(!showForm);
                 setEditingFormat(null);
+                setDropdownInputs({}); // Clear dropdown inputs
                 setFormData({
                   name: '',
                   description: '',
@@ -905,7 +1087,7 @@ function ExcelFormatsComponent() {
                 <div className="space-y-2 mb-2">
                   {formData.columns.map((col, index) => (
                     <div key={index} className="flex gap-2 items-start p-3 bg-gray-50 rounded border">
-                      <div className="flex-1 grid grid-cols-5 gap-2">
+                      <div className="flex-1 grid grid-cols-6 gap-2">
                         <input
                           type="text"
                           value={col.name}
@@ -945,17 +1127,73 @@ function ExcelFormatsComponent() {
                             {col.editable === false ? 'Read Only' : 'Editable'}
                           </span>
                         </label>
-                        {col.type === 'dropdown' && (
+                        <label className="flex items-center text-sm">
                           <input
-                            type="text"
-                            value={col.validation?.options?.join(',') || ''}
-                            onChange={(e) => updateColumn(index, 'validation', {
-                              ...col.validation,
-                              options: e.target.value.split(',').map((s: string) => s.trim()).filter((s: string) => s)
-                            })}
-                            placeholder="Options (comma-separated)"
-                            className="px-2 py-1 border rounded text-sm"
+                            type="checkbox"
+                            checked={col.unique === true}
+                            onChange={(e) => {
+                              console.log(`Updating column ${index} unique from ${col.unique} to ${e.target.checked}`);
+                              updateColumn(index, 'unique', e.target.checked);
+                            }}
+                            className="mr-1"
                           />
+                          <span className="text-blue-600 font-semibold">
+                            Unique
+                          </span>
+                        </label>
+                        {col.type === 'dropdown' && (
+                          <div className="flex flex-col gap-1">
+                            <input
+                              type="text"
+                              value={dropdownInputs[index] !== undefined ? dropdownInputs[index] : (col.validation?.options?.join(', ') || '')}
+                              onChange={(e) => {
+                                const inputValue = e.target.value;
+                                // Store raw input value to allow commas while typing
+                                setDropdownInputs(prev => ({
+                                  ...prev,
+                                  [index]: inputValue
+                                }));
+                                
+                                // Parse and update options in real-time (but keep raw input)
+                                const options = inputValue
+                                  .split(',')
+                                  .map((s: string) => s.trim())
+                                  .filter((s: string) => s.length > 0);
+                                
+                                // Update validation with current options
+                                updateColumn(index, 'validation', {
+                                  ...col.validation,
+                                  options: options
+                                });
+                              }}
+                              onBlur={(e) => {
+                                // On blur, clean up and finalize options
+                                const inputValue = e.target.value.trim();
+                                const options = inputValue
+                                  .split(',')
+                                  .map((s: string) => s.trim())
+                                  .filter((s: string) => s.length > 0);
+                                
+                                // Update both the input display and validation
+                                setDropdownInputs(prev => ({
+                                  ...prev,
+                                  [index]: options.join(', ')
+                                }));
+                                
+                                updateColumn(index, 'validation', {
+                                  ...col.validation,
+                                  options: options
+                                });
+                              }}
+                              placeholder="Options (comma-separated, e.g., a, b, c)"
+                              className="px-2 py-1 border rounded text-sm w-full"
+                            />
+                            {col.validation?.options && col.validation.options.length > 0 && (
+                              <div className="text-xs text-gray-500">
+                                {col.validation.options.length} option(s): {col.validation.options.join(', ')}
+                              </div>
+                            )}
+                          </div>
                         )}
                         {col.type === 'number' && (
                           <div className="flex gap-1">
@@ -1185,6 +1423,7 @@ function ExcelFormatsComponent() {
                   type="button"
                   onClick={() => {
                     setShowForm(false);
+        setDropdownInputs({}); // Clear dropdown inputs
                     setEditingFormat(null);
                     setImportedRowData([]);
                   }}

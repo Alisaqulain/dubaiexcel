@@ -36,8 +36,51 @@ async function handleGetCreatedExcelFiles(req: AuthenticatedRequest) {
       .skip(skip)
       .lean();
 
+    // Backfill mergeCount for files that don't have it set
+    // Count how many times each file appears in mergedFrom arrays
+    const allMergedFiles = await CreatedExcelFile.find({ isMerged: true })
+      .select('mergedFrom')
+      .lean();
+    
+    const mergeCountMap = new Map<string, number>();
+    allMergedFiles.forEach((mergedFile: any) => {
+      if (mergedFile.mergedFrom && Array.isArray(mergedFile.mergedFrom)) {
+        mergedFile.mergedFrom.forEach((fileId: any) => {
+          const idStr = fileId.toString();
+          mergeCountMap.set(idStr, (mergeCountMap.get(idStr) || 0) + 1);
+        });
+      }
+    });
+
+    // Update mergeCount for files that need it
+    const filesToUpdate: string[] = [];
+    files.forEach((file: any) => {
+      const fileIdStr = file._id.toString();
+      const calculatedCount = mergeCountMap.get(fileIdStr) || 0;
+      if (file.mergeCount === undefined || file.mergeCount === null || file.mergeCount !== calculatedCount) {
+        filesToUpdate.push(fileIdStr);
+        file.mergeCount = calculatedCount;
+      }
+    });
+
+    // Batch update files that need mergeCount set/updated
+    if (filesToUpdate.length > 0) {
+      await Promise.all(filesToUpdate.map(async (fileIdStr) => {
+        const calculatedCount = mergeCountMap.get(fileIdStr) || 0;
+        await CreatedExcelFile.updateOne(
+          { _id: fileIdStr },
+          { $set: { mergeCount: calculatedCount } }
+        );
+      }));
+    }
+
     // Enhance files with employee info if createdBy is not populated (means it's an employee)
     const enhancedFiles = await Promise.all(files.map(async (file: any) => {
+      // Ensure mergeCount is always defined (default to 0 if not set)
+      if (file.mergeCount === undefined || file.mergeCount === null) {
+        file.mergeCount = 0;
+      }
+      
       // If createdBy is not populated (null or string ID), try to get employee info
       if (!file.createdBy || typeof file.createdBy === 'string') {
         try {
