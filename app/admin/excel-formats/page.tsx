@@ -144,6 +144,50 @@ function ExcelFormatsComponent() {
     });
   };
 
+  // Helper function to format cell value for display (especially dates)
+  const formatCellValueForDisplay = (value: any, columnType: string): string => {
+    if (value === undefined || value === null || value === '') return '';
+    
+    const stringValue = String(value).trim();
+    
+    // Handle date columns - convert Excel serial dates to readable format
+    if (columnType === 'date') {
+      // Check if it's an Excel serial date number (e.g., 45117, 45072)
+      const excelSerial = parseFloat(stringValue);
+      if (!isNaN(excelSerial) && excelSerial > 0 && excelSerial < 1000000) {
+        // Excel serial date: days since January 1, 1900
+        // Excel epoch starts on 1900-01-01, but Excel incorrectly treats 1900 as a leap year
+        const excelEpoch = new Date(1899, 11, 30); // December 30, 1899
+        const date = new Date(excelEpoch.getTime() + excelSerial * 24 * 60 * 60 * 1000);
+        if (!isNaN(date.getTime())) {
+          // Format as DD/MM/YYYY for display
+          const day = String(date.getDate()).padStart(2, '0');
+          const month = String(date.getMonth() + 1).padStart(2, '0');
+          const year = date.getFullYear();
+          return `${day}/${month}/${year}`;
+        }
+      }
+      
+      // If already in YYYY-MM-DD format, convert to DD/MM/YYYY
+      if (/^\d{4}-\d{2}-\d{2}$/.test(stringValue)) {
+        const parts = stringValue.split('-');
+        return `${parts[2]}/${parts[1]}/${parts[0]}`;
+      }
+      
+      // Try parsing as date
+      const parsedDate = new Date(stringValue);
+      if (!isNaN(parsedDate.getTime()) && parsedDate.getFullYear() > 1900 && parsedDate.getFullYear() < 2100) {
+        const day = String(parsedDate.getDate()).padStart(2, '0');
+        const month = String(parsedDate.getMonth() + 1).padStart(2, '0');
+        const year = parsedDate.getFullYear();
+        return `${day}/${month}/${year}`;
+      }
+    }
+    
+    // For other types, return as string
+    return stringValue;
+  };
+
   // Helper function to convert value to target type
   const convertValueToType = (value: any, targetType: string, originalType?: string): any => {
     if (!value || value === '') return '';
@@ -1623,9 +1667,7 @@ function ExcelFormatsComponent() {
                                     col.editable === false ? 'bg-gray-50' : ''
                                   }`}
                                 >
-                                  {row[col.name] !== undefined && row[col.name] !== null
-                                    ? String(row[col.name])
-                                    : ''}
+                                  {formatCellValueForDisplay(row[col.name], col.type)}
                                 </td>
                               ))}
                           </tr>
