@@ -66,6 +66,9 @@ function ExcelFormatsComponent() {
   const [uploadResult, setUploadResult] = useState<any>(null);
   const [importedRowData, setImportedRowData] = useState<Record<string, any>[]>([]); // Store imported row data
   const [dropdownInputs, setDropdownInputs] = useState<{ [key: number]: string }>({}); // Track raw dropdown input values
+  const [viewingFormatId, setViewingFormatId] = useState<string | null>(null);
+  const [formatTemplateData, setFormatTemplateData] = useState<any[]>([]);
+  const [viewingFormatColumns, setViewingFormatColumns] = useState<Column[]>([]);
   const [formData, setFormData] = useState({
     name: '',
     description: '',
@@ -867,6 +870,26 @@ function ExcelFormatsComponent() {
     }
   };
 
+  const handleViewFormat = async (formatId: string) => {
+    try {
+      const response = await fetch(`/api/admin/excel-formats/${formatId}/view`, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+        },
+      });
+      const result = await response.json();
+      if (result.success) {
+        setFormatTemplateData(result.data.rows || []);
+        setViewingFormatColumns(result.data.columns || []);
+        setViewingFormatId(formatId);
+      } else {
+        alert(result.error || 'Failed to load format data');
+      }
+    } catch (err: any) {
+      alert(err.message || 'Failed to load format data');
+    }
+  };
+
   const handleDownloadFormat = async (formatId: string, formatName: string) => {
     try {
       const response = await fetch(`/api/admin/excel-formats/${formatId}/download`, {
@@ -1483,8 +1506,15 @@ function ExcelFormatsComponent() {
                         <div className="flex flex-col gap-2">
                           <div className="flex gap-2">
                           <button
+                            onClick={() => handleViewFormat(format._id)}
+                            className="text-green-600 hover:text-green-900"
+                            title="View Format Template Data"
+                          >
+                            View
+                          </button>
+                          <button
                             onClick={() => handleDownloadFormatExcel(format)}
-                            className="text-green-600 hover:text-green-900 mr-2"
+                            className="text-green-600 hover:text-green-900"
                             title="Download Format as Excel"
                           >
                             📥 Download
@@ -1529,6 +1559,100 @@ function ExcelFormatsComponent() {
             </div>
           )}
         </div>
+
+        {/* View Format Template Data Modal */}
+        {viewingFormatId && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+            <div className="bg-white rounded-lg shadow-xl max-w-7xl w-full max-h-[90vh] flex flex-col">
+              <div className="flex justify-between items-center p-6 border-b">
+                <h2 className="text-2xl font-bold">Format Template Data</h2>
+                <button
+                  onClick={() => {
+                    setViewingFormatId(null);
+                    setFormatTemplateData([]);
+                    setViewingFormatColumns([]);
+                  }}
+                  className="text-gray-500 hover:text-gray-700 text-2xl font-bold"
+                >
+                  ×
+                </button>
+              </div>
+              <div className="p-6 overflow-auto flex-1">
+                {formatTemplateData.length === 0 ? (
+                  <div className="text-center py-8 text-gray-500">
+                    No template data available for this format.
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-gray-200 border border-gray-300">
+                      <thead className="bg-gray-50 sticky top-0">
+                        <tr>
+                          <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase border border-gray-300 bg-gray-100">
+                            #
+                          </th>
+                          {viewingFormatColumns
+                            .sort((a, b) => a.order - b.order)
+                            .map((col) => (
+                              <th
+                                key={col.name}
+                                className="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase border border-gray-300 bg-gray-100 whitespace-nowrap"
+                              >
+                                {col.name}
+                                {col.required && <span className="text-red-500 ml-1">*</span>}
+                                <div className="text-xs font-normal text-gray-500 mt-1">
+                                  {col.type}
+                                  {col.editable === false && <span className="text-red-600 ml-1">(Read-only)</span>}
+                                  {col.unique && <span className="text-blue-600 ml-1">(Unique)</span>}
+                                </div>
+                              </th>
+                            ))}
+                        </tr>
+                      </thead>
+                      <tbody className="bg-white divide-y divide-gray-200">
+                        {formatTemplateData.map((row, rowIndex) => (
+                          <tr key={rowIndex} className="hover:bg-gray-50">
+                            <td className="px-4 py-3 text-sm font-medium text-gray-500 border border-gray-300">
+                              {rowIndex + 1}
+                            </td>
+                            {viewingFormatColumns
+                              .sort((a, b) => a.order - b.order)
+                              .map((col) => (
+                                <td
+                                  key={col.name}
+                                  className={`px-4 py-3 text-sm border border-gray-300 ${
+                                    col.editable === false ? 'bg-gray-50' : ''
+                                  }`}
+                                >
+                                  {row[col.name] !== undefined && row[col.name] !== null
+                                    ? String(row[col.name])
+                                    : ''}
+                                </td>
+                              ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+              <div className="p-6 border-t flex justify-between items-center">
+                <div className="text-sm text-gray-600">
+                  Total Rows: <strong>{formatTemplateData.length}</strong> | Total Columns: <strong>{viewingFormatColumns.length}</strong>
+                </div>
+                <button
+                  onClick={() => {
+                    setViewingFormatId(null);
+                    setFormatTemplateData([]);
+                    setViewingFormatColumns([]);
+                  }}
+                  className="px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
