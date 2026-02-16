@@ -60,15 +60,19 @@ async function handleGetMyFormat(req: AuthenticatedRequest) {
       );
     }
 
-    // Get template data if exists
+    // Get template data if exists (limit rows to avoid lag - max 250 for initial load)
+    const templateLimit = 250;
     const templateData = await FormatTemplateData.findOne({ formatId: format._id })
       .select('rows')
       .lean();
 
-    // Include template rows in response
     const responseData: any = { ...format };
     if (templateData && templateData.rows) {
-      responseData.templateRows = templateData.rows;
+      const allRows = templateData.rows as any[];
+      responseData.templateRowCount = allRows.length;
+      responseData.templateRows = allRows.length > templateLimit
+        ? allRows.slice(0, templateLimit)
+        : allRows;
     }
 
     return NextResponse.json({

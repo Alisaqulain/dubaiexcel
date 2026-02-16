@@ -3,6 +3,18 @@
 import { useEffect, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import ExcelCreator from './ExcelCreator';
+import { highlightAllSearchMatches } from './HighlightSearch';
+import { useDebounce, SEARCH_DEBOUNCE_MS } from '@/lib/useDebounce';
+
+function getColumnLetter(index: number): string {
+  let s = '';
+  let n = index;
+  while (n >= 0) {
+    s = String.fromCharCode(65 + (n % 26)) + s;
+    n = Math.floor(n / 26) - 1;
+  }
+  return s;
+}
 
 
 interface CreatedFile {
@@ -45,6 +57,10 @@ export default function EmployeeDashboard() {
   const [editingFileId, setEditingFileId] = useState<string | null>(null);
   const [viewingFileId, setViewingFileId] = useState<string | null>(null);
   const [fileData, setFileData] = useState<any[]>([]);
+  const [filesListSearch, setFilesListSearch] = useState('');
+  const [viewDataSearch, setViewDataSearch] = useState('');
+  const debouncedFilesListSearch = useDebounce(filesListSearch, SEARCH_DEBOUNCE_MS);
+  const debouncedViewDataSearch = useDebounce(viewDataSearch, SEARCH_DEBOUNCE_MS);
 
   useEffect(() => {
     fetchMyFormats();
@@ -102,6 +118,7 @@ export default function EmployeeDashboard() {
       if (result.success) {
         setFileData(result.data.data);
         setViewingFileId(fileId);
+        setViewDataSearch('');
       } else {
         setMessage({ type: 'error', text: result.error || 'Failed to load file' });
       }
@@ -374,7 +391,24 @@ export default function EmployeeDashboard() {
           ) : myCreatedFiles.length === 0 ? (
             <div className="text-center py-8 text-gray-500">No saved files yet. Create your first Excel file above.</div>
           ) : (
-            <div className="overflow-x-auto">
+            <>
+              <div className="mb-4 flex flex-wrap items-center gap-3">
+                <label className="text-sm font-medium text-gray-700">Search:</label>
+                <input
+                  type="text"
+                  value={filesListSearch}
+                  onChange={(e) => setFilesListSearch(e.target.value)}
+                  placeholder="Search filename, labour type..."
+                  className="px-3 py-2 border border-gray-300 rounded-md text-sm w-64 focus:ring-1 focus:ring-blue-500"
+                />
+                {filesListSearch && (
+                  <button type="button" onClick={() => setFilesListSearch('')} className="px-2 py-1.5 text-sm bg-gray-200 rounded hover:bg-gray-300">Clear</button>
+                )}
+                <span className="text-xs text-gray-500">
+                  {(debouncedFilesListSearch.trim() ? myCreatedFiles.filter((f) => (f.originalFilename || '').toLowerCase().includes(debouncedFilesListSearch.trim().toLowerCase()) || (f.labourType || '').toLowerCase().includes(debouncedFilesListSearch.trim().toLowerCase())).length : myCreatedFiles.length)} of {myCreatedFiles.length} file(s)
+                </span>
+              </div>
+              <div className="overflow-x-auto">
               <table className="min-w-full divide-y divide-gray-200">
                 <thead className="bg-gray-50">
                   <tr>
@@ -386,16 +420,16 @@ export default function EmployeeDashboard() {
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-gray-200">
-                  {myCreatedFiles.map((file) => (
+                  {(debouncedFilesListSearch.trim() ? myCreatedFiles.filter((f) => (f.originalFilename || '').toLowerCase().includes(debouncedFilesListSearch.trim().toLowerCase()) || (f.labourType || '').toLowerCase().includes(debouncedFilesListSearch.trim().toLowerCase())) : myCreatedFiles).map((file) => (
                     <tr key={file._id} className="hover:bg-gray-50">
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{file.originalFilename}</td>
+                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{highlightAllSearchMatches(file.originalFilename, debouncedFilesListSearch)}</td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
                         <span className={`px-2 py-1 text-xs rounded-full ${
                           file.labourType === 'OUR_LABOUR' ? 'bg-blue-100 text-blue-800' :
                           file.labourType === 'SUPPLY_LABOUR' ? 'bg-green-100 text-green-800' :
                           'bg-purple-100 text-purple-800'
                         }`}>
-                          {file.labourType.replace('_', ' ')}
+                          {highlightAllSearchMatches(file.labourType.replace('_', ' '), debouncedFilesListSearch)}
                         </span>
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{file.rowCount}</td>
@@ -423,50 +457,84 @@ export default function EmployeeDashboard() {
                 </tbody>
               </table>
             </div>
+            </>
           )}
         </div>
 
-        {/* View File Modal */}
-        {viewingFileId && fileData.length > 0 && (
-          <div className="bg-white rounded-lg shadow p-6 mb-6">
-            <div className="flex justify-between items-center mb-4">
-              <h2 className="text-xl font-semibold">View File Data</h2>
-              <button
-                onClick={() => {
-                  setViewingFileId(null);
-                  setFileData([]);
-                }}
-                className="px-4 py-2 text-gray-600 hover:text-gray-800 border border-gray-300 rounded-md"
-              >
-                Close
-              </button>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-gray-200">
-                <thead className="bg-gray-50">
-                  <tr>
-                    {Object.keys(fileData[0] || {}).map((key) => (
-                      <th key={key} className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                        {key}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody className="bg-white divide-y divide-gray-200">
-                  {fileData.map((row, idx) => (
-                    <tr key={idx} className="hover:bg-gray-50">
-                      {Object.values(row).map((value: any, colIdx) => (
-                        <td key={colIdx} className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                          {value || ''}
-                        </td>
+        {/* View File Modal - Excel-style view with search and yellow highlight */}
+        {viewingFileId && fileData.length > 0 && (() => {
+          const columns = Object.keys(fileData[0] || {});
+          const q = debouncedViewDataSearch.trim().toLowerCase();
+          const filteredRows = q
+            ? fileData.filter((row) =>
+                columns.some((col) => String(row[col] ?? '').toLowerCase().includes(q))
+              )
+            : fileData;
+          return (
+            <div className="bg-white rounded-lg shadow-lg border border-gray-200 p-6 mb-6">
+              <div className="flex justify-between items-center mb-4 flex-wrap gap-3 bg-[#f8f9fa] -m-6 p-4 rounded-t-lg border-b">
+                <h2 className="text-xl font-semibold text-gray-800">View File Data (Excel View)</h2>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={viewDataSearch}
+                    onChange={(e) => setViewDataSearch(e.target.value)}
+                    placeholder="Search in data..."
+                    className="px-3 py-1.5 border border-gray-300 rounded text-sm w-52 focus:ring-1 focus:ring-blue-500"
+                  />
+                  {viewDataSearch && (
+                    <button type="button" onClick={() => setViewDataSearch('')} className="px-2 py-1.5 text-sm bg-gray-200 rounded hover:bg-gray-300">Clear</button>
+                  )}
+                </div>
+                <button
+                  onClick={() => {
+                    setViewingFileId(null);
+                    setFileData([]);
+                    setViewDataSearch('');
+                  }}
+                  className="px-4 py-2 text-gray-600 hover:text-gray-800 border border-gray-300 rounded-md"
+                >
+                  Close
+                </button>
+              </div>
+              <div className="overflow-auto max-h-[70vh] bg-[#e2e8f0] p-2 rounded">
+                <div className="inline-block min-w-full border border-gray-300 bg-white shadow-sm" style={{ fontFamily: 'Calibri, Arial, sans-serif' }}>
+                  <table className="border-collapse" style={{ tableLayout: 'fixed', minWidth: 'max-content' }}>
+                    <thead>
+                      <tr>
+                        <th className="sticky left-0 top-0 z-20 w-12 min-w-12 px-2 py-1.5 text-center text-xs font-semibold bg-[#217346] text-white border border-gray-400 shadow-sm" />
+                        {columns.map((col, idx) => (
+                          <th key={col} className="sticky top-0 z-10 min-w-[120px] max-w-[200px] px-2 py-1.5 text-left text-xs font-semibold bg-[#217346] text-white border border-gray-400 whitespace-nowrap">
+                            <span className="text-[10px] text-gray-200 mr-1">{getColumnLetter(idx)}</span>
+                            {col}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredRows.map((row, rowIndex) => (
+                        <tr key={rowIndex} className="hover:bg-[#e8f4ea]">
+                          <td className="sticky left-0 z-10 w-12 min-w-12 px-2 py-1 text-center text-xs font-medium bg-[#f3f4f6] text-gray-600 border border-gray-300">
+                            {rowIndex + 1}
+                          </td>
+                          {columns.map((col) => (
+                            <td key={col} className="px-2 py-1 text-sm border border-gray-300 min-w-[120px] max-w-[200px] bg-white">
+                              {highlightAllSearchMatches(row[col], debouncedViewDataSearch)}
+                            </td>
+                          ))}
+                        </tr>
                       ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+                    </tbody>
+                  </table>
+                </div>
+                {filteredRows.length === 0 && <p className="text-gray-500 py-4 text-center">No rows match search.</p>}
+              </div>
+              <div className="mt-3 text-sm text-gray-600">
+                {fileData.length} row(s){debouncedViewDataSearch && ` (showing ${filteredRows.length} matching)`} × {columns.length} columns
+              </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
 
       </div>
     </div>

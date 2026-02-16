@@ -4,6 +4,8 @@ import { useState, useEffect } from 'react';
 import { ProtectedRoute } from '../../components/ProtectedRoute';
 import Navigation from '../../components/Navigation';
 import { useAuth } from '../../context/AuthContext';
+import { highlightAllSearchMatches } from '../../components/HighlightSearch';
+import { useDebounce, SEARCH_DEBOUNCE_MS } from '@/lib/useDebounce';
 import * as XLSX from 'xlsx';
 
 interface Employee {
@@ -47,7 +49,24 @@ function EmployeesComponent() {
     active: true,
     password: '',
   });
+  const [employeeSearch, setEmployeeSearch] = useState('');
+  const debouncedEmployeeSearch = useDebounce(employeeSearch, SEARCH_DEBOUNCE_MS);
   const { token } = useAuth();
+
+  const filteredEmployees = debouncedEmployeeSearch.trim()
+    ? employees.filter((emp) => {
+        const q = debouncedEmployeeSearch.trim().toLowerCase();
+        return (
+          (emp.empId || '').toLowerCase().includes(q) ||
+          (emp.name || '').toLowerCase().includes(q) ||
+          (emp.site || '').toLowerCase().includes(q) ||
+          (emp.siteType || '').toLowerCase().includes(q) ||
+          (emp.role || '').toLowerCase().includes(q) ||
+          (emp.department || '').toLowerCase().includes(q) ||
+          (emp.active ? 'active' : 'inactive').includes(q)
+        );
+      })
+    : employees;
 
   useEffect(() => {
     fetchEmployees();
@@ -504,6 +523,21 @@ function EmployeesComponent() {
           </div>
         )}
 
+        <div className="mb-4 flex flex-wrap items-center gap-3">
+          <label className="text-sm font-medium text-gray-700">Search:</label>
+          <input
+            type="text"
+            value={employeeSearch}
+            onChange={(e) => setEmployeeSearch(e.target.value)}
+            placeholder="Search by User ID, name, site, role, department..."
+            className="px-3 py-2 border border-gray-300 rounded-md text-sm w-72 focus:ring-1 focus:ring-blue-500"
+          />
+          {employeeSearch && (
+            <button type="button" onClick={() => setEmployeeSearch('')} className="px-2 py-1.5 text-sm bg-gray-200 rounded hover:bg-gray-300">Clear</button>
+          )}
+          <span className="text-xs text-gray-500">{filteredEmployees.length} of {employees.length} user(s){employeeSearch !== debouncedEmployeeSearch ? ' …' : ''}</span>
+        </div>
+
         {showBulkUpload && (
           <div className="bg-white rounded-lg shadow p-6 mb-6">
             <h2 className="text-xl font-semibold mb-4">Bulk Upload Users</h2>
@@ -672,19 +706,19 @@ function EmployeesComponent() {
               </tr>
             </thead>
             <tbody className="bg-white divide-y divide-gray-200">
-              {employees.map((emp) => (
-                <tr key={emp._id}>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{emp.empId}</td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{emp.name}</td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{emp.site}</td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{emp.siteType}</td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{emp.role}</td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{emp.department || '-'}</td>
+              {filteredEmployees.map((emp) => (
+                <tr key={emp._id} className="hover:bg-gray-50">
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{highlightAllSearchMatches(emp.empId, debouncedEmployeeSearch)}</td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{highlightAllSearchMatches(emp.name, debouncedEmployeeSearch)}</td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{highlightAllSearchMatches(emp.site, debouncedEmployeeSearch)}</td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{highlightAllSearchMatches(emp.siteType, debouncedEmployeeSearch)}</td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{highlightAllSearchMatches(emp.role, debouncedEmployeeSearch)}</td>
+                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{highlightAllSearchMatches(emp.department || '-', debouncedEmployeeSearch)}</td>
                   <td className="px-6 py-4 whitespace-nowrap">
                     <span className={`px-2 py-1 text-xs rounded-full ${
                       emp.active ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
                     }`}>
-                      {emp.active ? 'Active' : 'Inactive'}
+                      {highlightAllSearchMatches(emp.active ? 'Active' : 'Inactive', debouncedEmployeeSearch)}
                     </span>
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">

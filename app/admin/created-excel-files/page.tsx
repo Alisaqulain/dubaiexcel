@@ -1,9 +1,23 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { ProtectedRoute } from '../../components/ProtectedRoute';
 import Navigation from '../../components/Navigation';
 import { useAuth } from '../../context/AuthContext';
+import { highlightAllSearchMatches } from '../../components/HighlightSearch';
+import { useDebounce, SEARCH_DEBOUNCE_MS } from '@/lib/useDebounce';
+
+const EXCEL_VIEW_PAGE_SIZE = 100;
+
+function getColumnLetter(index: number): string {
+  let s = '';
+  let n = index;
+  while (n >= 0) {
+    s = String.fromCharCode(65 + (n % 26)) + s;
+    n = Math.floor(n / 26) - 1;
+  }
+  return s;
+}
 
 interface AttendanceStats {
   present: number;
@@ -70,7 +84,24 @@ function CreatedExcelFilesComponent() {
   const [activeTab, setActiveTab] = useState<'original' | 'merged'>('original'); // Tab to filter files
   const [viewingFileId, setViewingFileId] = useState<string | null>(null);
   const [fileData, setFileData] = useState<any[]>([]);
-  
+  const [viewColumns, setViewColumns] = useState<string[]>([]);
+  const [viewLoginColumnName, setViewLoginColumnName] = useState('');
+  const [loginColumnSelected, setLoginColumnSelected] = useState('');
+  const [siteList, setSiteList] = useState<{ siteValue: string; password: string }[]>([]);
+  const [showLoginColumnPanel, setShowLoginColumnPanel] = useState(false);
+  const [viewTab, setViewTab] = useState<'data' | 'format'>('data');
+  const [viewFormatId, setViewFormatId] = useState<string | null>(null);
+  const [viewFormatDetail, setViewFormatDetail] = useState<{ name: string; columns: { name: string; type: string; required: boolean; editable: boolean }[] } | null>(null);
+  const [dataGridSearch, setDataGridSearch] = useState('');
+  const debouncedDataGridSearch = useDebounce(dataGridSearch, SEARCH_DEBOUNCE_MS);
+  const [dataGridColumnFilters, setDataGridColumnFilters] = useState<Record<string, string>>({});
+  const [excelViewPage, setExcelViewPage] = useState(0);
+  const [savingSiteLogins, setSavingSiteLogins] = useState(false);
+  const [loadingUniqueValues, setLoadingUniqueValues] = useState(false);
+  const [updatingRowCell, setUpdatingRowCell] = useState<string | null>(null);
+  const [filesListSearch, setFilesListSearch] = useState('');
+  const debouncedFilesListSearch = useDebounce(filesListSearch, SEARCH_DEBOUNCE_MS);
+
   type FileEditNotification = {
     fileId: string;
     filename: string;
@@ -82,6 +113,48 @@ function CreatedExcelFilesComponent() {
   useEffect(() => {
     fetchFiles();
   }, [filterLabourType]);
+
+  useEffect(() => {
+    if (viewTab !== 'format' || !viewFormatId || !token) return;
+    fetch(`/api/admin/excel-formats/${viewFormatId}`, { headers: { Authorization: `Bearer ${token}` } })
+      .then((r) => r.json())
+      .then((json) => {
+        if (json.success && json.data) {
+          const f = json.data;
+          setViewFormatDetail({
+            name: f.name || 'Format',
+            columns: (f.columns || []).map((c: any) => ({
+              name: c.name || '',
+              type: c.type || 'text',
+              required: !!c.required,
+              editable: c.editable !== false,
+            })),
+          });
+        } else setViewFormatDetail(null);
+      })
+      .catch(() => setViewFormatDetail(null));
+  }, [viewTab, viewFormatId, token]);
+
+  const viewColumnsComputed = useMemo(
+    () => (viewColumns.length > 0 ? viewColumns : fileData[0] ? Object.keys(fileData[0]) : []),
+    [viewColumns, fileData]
+  );
+  const filteredData = useMemo(() => {
+    const q = debouncedDataGridSearch.trim().toLowerCase();
+    const colFilters = dataGridColumnFilters;
+    if (!q && !Object.values(colFilters).some((v) => v.trim())) return fileData;
+    return fileData.filter((row) => {
+      if (q) {
+        const matchSearch = viewColumnsComputed.some((col) => String(row[col] ?? '').toLowerCase().includes(q));
+        if (!matchSearch) return false;
+      }
+      for (const col of viewColumnsComputed) {
+        const f = colFilters[col]?.trim().toLowerCase();
+        if (f && String(row[col] ?? '').toLowerCase().indexOf(f) === -1) return false;
+      }
+      return true;
+    });
+  }, [fileData, viewColumnsComputed, debouncedDataGridSearch, dataGridColumnFilters]);
 
   const fetchFiles = async () => {
     try {
@@ -264,9 +337,8 @@ function CreatedExcelFilesComponent() {
       }
     }
 
-    // Close modal
+    if (merging) return; // Prevent double submit
     setShowMergeFilenameModal(false);
-
     setMerging(true);
     setMessage(null);
 
@@ -448,14 +520,32 @@ function CreatedExcelFilesComponent() {
   const handleViewFile = async (fileId: string) => {
     try {
       const response = await fetch(`/api/admin/created-excel-files/${fileId}/view`, {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
+        headers: { 'Authorization': `Bearer ${token}` },
       });
       const result = await response.json();
       if (result.success) {
-        setFileData(result.data.data || []);
+        const data = result.data;
+        setFileData(data.data || []);
+        setViewColumns(data.columns || (data.data?.length ? Object.keys(data.data[0] || {}) : []));
+        setViewLoginColumnName(data.loginColumnName || '');
+        setLoginColumnSelected(data.loginColumnName || '');
+        setViewFormatId(data.formatId || null);
+        setViewFormatDetail(null);
+        setViewTab('data');
+        setDataGridSearch('');
+        setDataGridColumnFilters({});
+        setExcelViewPage(0);
+        setShowLoginColumnPanel(false);
         setViewingFileId(fileId);
+        const siteRes = await fetch(`/api/admin/created-excel-files/${fileId}/site-logins`, {
+          headers: { 'Authorization': `Bearer ${token}` },
+        });
+        const siteJson = await siteRes.json();
+        if (siteJson.success && Array.isArray(siteJson.data?.sites)) {
+          setSiteList(siteJson.data.sites.map((s: { siteValue: string }) => ({ siteValue: s.siteValue, password: '' })));
+        } else {
+          setSiteList([]);
+        }
       } else {
         setMessage({ type: 'error', text: result.error || 'Failed to load file' });
       }
@@ -464,20 +554,265 @@ function CreatedExcelFilesComponent() {
     }
   };
 
-  // Filter files based on active tab, but allow cross-tab selection
+  const closeExcelView = () => {
+    setViewingFileId(null);
+    setFileData([]);
+    setViewColumns([]);
+    setViewLoginColumnName('');
+    setLoginColumnSelected('');
+    setSiteList([]);
+    setViewTab('data');
+    setViewFormatId(null);
+    setViewFormatDetail(null);
+    setDataGridSearch('');
+    setDataGridColumnFilters({});
+    setExcelViewPage(0);
+  };
+
+  const handleLoadUniqueValues = async () => {
+    if (!viewingFileId || !loginColumnSelected) return;
+    setLoadingUniqueValues(true);
+    try {
+      const res = await fetch(`/api/admin/created-excel-files/${viewingFileId}/unique-values?column=${encodeURIComponent(loginColumnSelected)}`, { headers: { Authorization: `Bearer ${token}` } });
+      const json = await res.json();
+      if (json.success && Array.isArray(json.data?.uniqueValues)) {
+        const unique = json.data.uniqueValues as string[];
+        setSiteList((prev) => {
+          const byVal = new Map(prev.map((s) => [s.siteValue, s.password]));
+          return unique.map((v) => ({ siteValue: v, password: byVal.get(v) ?? '' }));
+        });
+      }
+    } catch (e) {
+      setMessage({ type: 'error', text: 'Failed to load unique values' });
+    } finally {
+      setLoadingUniqueValues(false);
+    }
+  };
+
+  const handleSaveSiteLogins = async () => {
+    if (!viewingFileId) return;
+    setSavingSiteLogins(true);
+    try {
+      const sites = siteList.map((s) => ({ siteValue: s.siteValue.trim(), password: s.password.trim() || undefined })).filter((s) => s.siteValue);
+      const res = await fetch(`/api/admin/created-excel-files/${viewingFileId}/site-logins`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ loginColumnName: loginColumnSelected.trim(), sites }),
+      });
+      const json = await res.json();
+      if (json.success) {
+        setViewLoginColumnName(loginColumnSelected.trim());
+        setMessage({ type: 'success', text: 'Site logins saved.' });
+      } else setMessage({ type: 'error', text: json.error || 'Failed to save' });
+    } catch (e: any) {
+      setMessage({ type: 'error', text: e.message || 'Failed to save' });
+    } finally {
+      setSavingSiteLogins(false);
+    }
+  };
+
+  const handleUpdateRowCell = async (rowIndex: number, columnName: string, value: string) => {
+    if (!viewingFileId || !token) return;
+    const key = `${rowIndex}-${columnName}`;
+    setUpdatingRowCell(key);
+    try {
+      const res = await fetch(`/api/admin/created-excel-files/${viewingFileId}/row`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ rowIndex, columnName, value }),
+      });
+      const json = await res.json();
+      if (json.success) {
+        setFileData((prev) => {
+          const next = [...prev];
+          if (next[rowIndex]) next[rowIndex] = { ...next[rowIndex], [columnName]: value };
+          return next;
+        });
+      } else setMessage({ type: 'error', text: json.error || 'Failed to update cell' });
+    } catch (e: any) {
+      setMessage({ type: 'error', text: e.message || 'Failed to update cell' });
+    } finally {
+      setUpdatingRowCell(null);
+    }
+  };
+
+  // Filter files based on active tab and search
   const filteredFiles = files.filter(file => {
     if (activeTab === 'merged') {
-      return file.isMerged === true;
+      if (file.isMerged !== true) return false;
     } else {
-      return file.isMerged !== true;
+      if (file.isMerged === true) return false;
     }
+    const q = debouncedFilesListSearch.trim().toLowerCase();
+    if (!q) return true;
+    const fn = (file.originalFilename || file.filename || '').toLowerCase();
+    const by = (file.createdByName || (typeof file.createdBy === 'object' && file.createdBy?.name) || '').toLowerCase();
+    const lt = (file.labourType || '').toLowerCase();
+    return fn.includes(q) || by.includes(q) || lt.includes(q);
   });
 
   // Get all files for merge operations (across both tabs)
   const allFilesForMerge = files;
 
+  const viewingFile = viewingFileId ? files.find((f) => f._id === viewingFileId) : null;
+  const viewingFileName = viewingFile?.originalFilename ?? viewingFile?.filename ?? 'File';
+
   return (
     <div className="min-h-screen bg-gray-50 p-6">
+      {viewingFileId ? (
+        /* Full-page Excel-style view with Data / Format View tabs */
+        <div className="h-[calc(100vh-6rem)] flex flex-col bg-white rounded-lg shadow-lg border border-gray-200 overflow-hidden">
+          <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 bg-[#f8f9fa] shrink-0 flex-wrap gap-3">
+            <div className="flex items-center gap-3 flex-wrap">
+              <button type="button" onClick={closeExcelView} className="px-3 py-1.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded hover:bg-gray-50">← Back to list</button>
+              <span className="text-lg font-semibold text-gray-800">{viewingFileName}</span>
+              <span className="text-sm text-gray-500">{fileData.length} rows × {viewColumnsComputed.length} columns{filteredData.length !== fileData.length && ` (${filteredData.length} after filter)`}</span>
+              <button type="button" onClick={() => viewingFile && handleDownload(viewingFileId!, viewingFile.originalFilename)} className="px-3 py-1.5 text-sm font-medium text-blue-700 bg-blue-50 border border-blue-200 rounded hover:bg-blue-100">📥 Download</button>
+              <button type="button" onClick={() => setShowLoginColumnPanel((v) => !v)} className="px-3 py-1.5 text-sm font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded hover:bg-amber-100">{showLoginColumnPanel ? '▼' : '▶'} Login column & site logins{viewLoginColumnName && ` (${viewLoginColumnName})`}</button>
+            </div>
+          </div>
+          {showLoginColumnPanel && (
+            <div className="shrink-0 border-b border-gray-200 bg-amber-50/80 p-4 space-y-3">
+              <p className="text-sm text-gray-700">Choose a column as the login column. Unique values become sites.</p>
+              <div className="flex flex-wrap items-center gap-3">
+                <label className="text-sm font-medium text-gray-700">Login column</label>
+                <select value={loginColumnSelected} onChange={(e) => setLoginColumnSelected(e.target.value)} className="px-2 py-1.5 border border-gray-300 rounded bg-white text-sm min-w-[180px]">
+                  <option value="">— Select column —</option>
+                  {viewColumnsComputed.map((col) => <option key={col} value={col}>{col}</option>)}
+                </select>
+                <button type="button" onClick={handleLoadUniqueValues} disabled={!loginColumnSelected || loadingUniqueValues} className="px-3 py-1.5 text-sm font-medium bg-amber-600 text-white rounded hover:bg-amber-700 disabled:opacity-50">{loadingUniqueValues ? 'Loading...' : 'Load unique values'}</button>
+                <button type="button" onClick={() => setSiteList((prev) => [...prev, { siteValue: '', password: 'Password@1234' }])} className="px-2 py-1 text-sm bg-white border border-gray-300 rounded hover:bg-gray-50">+ Add site</button>
+                <button type="button" onClick={handleSaveSiteLogins} disabled={savingSiteLogins || !loginColumnSelected} className="px-3 py-1.5 text-sm font-medium bg-green-600 text-white rounded hover:bg-green-700 disabled:opacity-50">{savingSiteLogins ? 'Saving...' : 'Save site logins'}</button>
+              </div>
+              <div className="max-h-40 overflow-auto border border-gray-200 rounded bg-white">
+                <table className="min-w-full text-sm">
+                  <thead className="bg-gray-100 sticky top-0"><tr><th className="px-2 py-1.5 text-left font-medium text-gray-600 w-8">#</th><th className="px-2 py-1.5 text-left font-medium text-gray-600 min-w-[120px]">Site name</th><th className="px-2 py-1.5 text-left font-medium text-gray-600 min-w-[120px]">Password</th><th className="w-16" /></tr></thead>
+                  <tbody>
+                    {siteList.map((row, i) => (
+                      <tr key={i} className="border-t border-gray-100">
+                        <td className="px-2 py-1 text-gray-500">{i + 1}</td>
+                        <td className="px-2 py-1"><input type="text" value={row.siteValue} onChange={(e) => setSiteList((prev) => { const next = [...prev]; next[i] = { ...next[i], siteValue: e.target.value }; return next; })} placeholder="e.g. Site A" className="w-full px-2 py-1 border border-gray-300 rounded text-sm" /></td>
+                        <td className="px-2 py-1"><input type="password" value={row.password} onChange={(e) => setSiteList((prev) => { const next = [...prev]; next[i] = { ...next[i], password: e.target.value }; return next; })} placeholder="Password@1234" className="w-full px-2 py-1 border border-gray-300 rounded text-sm" /></td>
+                        <td className="px-2 py-1"><button type="button" onClick={() => setSiteList((prev) => prev.filter((_, j) => j !== i))} className="text-red-600 hover:text-red-800 text-xs">Delete</button></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+          <div className="flex border-b border-gray-200 bg-gray-50 shrink-0">
+            <button type="button" onClick={() => setViewTab('data')} className={`px-4 py-2 text-sm font-medium ${viewTab === 'data' ? 'bg-white border-b-2 border-blue-600 text-blue-600 border-t border-x border-gray-200 -mb-px' : 'text-gray-600 hover:text-gray-900'}`}>Data</button>
+            <button type="button" onClick={() => setViewTab('format')} className={`px-4 py-2 text-sm font-medium ${viewTab === 'format' ? 'bg-white border-b-2 border-blue-600 text-blue-600 border-t border-x border-gray-200 -mb-px' : 'text-gray-600 hover:text-gray-900'}`}>Format View</button>
+          </div>
+          {viewTab === 'format' ? (
+            <div className="flex-1 overflow-auto p-6">
+              {viewFormatDetail ? (
+                <div>
+                  <h3 className="text-lg font-semibold text-gray-800 mb-4">{viewFormatDetail.name}</h3>
+                  <table className="min-w-full border border-gray-200">
+                    <thead className="bg-gray-100"><tr><th className="px-3 py-2 text-left text-sm font-medium text-gray-700">Column</th><th className="px-3 py-2 text-left text-sm font-medium text-gray-700">Type</th><th className="px-3 py-2 text-left text-sm font-medium text-gray-700">Required</th><th className="px-3 py-2 text-left text-sm font-medium text-gray-700">Editable</th></tr></thead>
+                    <tbody className="bg-white">
+                      {viewFormatDetail.columns.map((c, i) => (
+                        <tr key={i} className="border-t border-gray-100"><td className="px-3 py-2 text-sm">{c.name}</td><td className="px-3 py-2 text-sm">{c.type}</td><td className="px-3 py-2 text-sm">{c.required ? 'Yes' : 'No'}</td><td className="px-3 py-2 text-sm">{c.editable ? 'Yes' : 'No'}</td></tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : viewFormatId ? (
+                <p className="text-gray-500">Loading format...</p>
+              ) : (
+                <p className="text-gray-500">No format linked to this file.</p>
+              )}
+            </div>
+          ) : (
+            <div className="flex-1 flex flex-col overflow-hidden p-2 bg-[#e2e8f0]">
+              <div className="shrink-0 mb-3 p-3 bg-white border border-gray-200 rounded-lg shadow-sm">
+                <h3 className="text-sm font-semibold text-gray-800 mb-2">Search &amp; Filter</h3>
+                <div className="flex flex-wrap items-center gap-3">
+                  <div className="flex items-center gap-2">
+                    <label className="text-sm font-medium text-gray-700 whitespace-nowrap">Search (all columns):</label>
+                    <input type="text" value={dataGridSearch} onChange={(e) => { setDataGridSearch(e.target.value); setExcelViewPage(0); }} placeholder="Type to search in all columns..." className="px-3 py-2 border border-gray-300 rounded-md text-sm w-64 focus:ring-2 focus:ring-blue-500 focus:border-blue-500" />
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <label className="text-sm font-medium text-gray-700 whitespace-nowrap">Filter by column:</label>
+                    <span className="text-xs text-gray-500">Use the filter row below each column header</span>
+                  </div>
+                  <button type="button" onClick={() => { setDataGridSearch(''); setDataGridColumnFilters({}); setExcelViewPage(0); }} className="px-3 py-2 text-sm font-medium bg-amber-100 text-amber-800 border border-amber-300 rounded-md hover:bg-amber-200">Clear search &amp; filters</button>
+                  <span className="text-sm text-gray-600">
+                    Showing <strong>{filteredData.length}</strong> of <strong>{fileData.length}</strong> rows
+                    {filteredData.length !== fileData.length && ' (filtered)'}
+                  </span>
+                </div>
+              </div>
+              <div className="flex-1 overflow-auto">
+                {(() => {
+                  const totalPages = Math.ceil(filteredData.length / EXCEL_VIEW_PAGE_SIZE) || 1;
+                  const page = Math.min(excelViewPage, totalPages - 1);
+                  const start = page * EXCEL_VIEW_PAGE_SIZE;
+                  const pageData = filteredData.slice(start, start + EXCEL_VIEW_PAGE_SIZE);
+                  return (
+                    <>
+                      {filteredData.length > EXCEL_VIEW_PAGE_SIZE && (
+                        <div className="flex items-center gap-2 mb-2 text-sm">
+                          <button type="button" onClick={() => setExcelViewPage((p) => Math.max(0, p - 1))} disabled={page === 0} className="px-3 py-1.5 border border-gray-300 rounded-md bg-white disabled:opacity-50">Previous</button>
+                          <span className="text-gray-600">Page {page + 1} of {totalPages}</span>
+                          <button type="button" onClick={() => setExcelViewPage((p) => Math.min(totalPages - 1, p + 1))} disabled={page >= totalPages - 1} className="px-3 py-1.5 border border-gray-300 rounded-md bg-white disabled:opacity-50">Next</button>
+                        </div>
+                      )}
+                      <div className="inline-block min-w-full border border-gray-300 bg-white shadow-sm" style={{ fontFamily: 'Calibri, Arial, sans-serif' }}>
+                        <table className="border-collapse" style={{ tableLayout: 'fixed', minWidth: 'max-content' }}>
+                          <thead>
+                            <tr>
+                              <th className="sticky left-0 top-0 z-20 w-12 min-w-12 px-2 py-1.5 text-center text-xs font-semibold bg-[#217346] text-white border border-gray-400 shadow-sm" />
+                              {viewColumnsComputed.map((col, idx) => (
+                                <th key={col} className="sticky top-0 z-10 min-w-[120px] max-w-[200px] px-2 py-1.5 text-left text-xs font-semibold bg-[#217346] text-white border border-gray-400 whitespace-nowrap">
+                                  <span className="text-[10px] text-gray-200 mr-1">{getColumnLetter(idx)}</span>
+                                  {col}
+                                </th>
+                              ))}
+                            </tr>
+                            <tr className="bg-[#e8f0e8]">
+                              <td className="sticky left-0 z-10 w-12 min-w-12 px-1 py-0.5 border border-gray-300 bg-[#e8f0e8] text-xs font-medium text-gray-600 text-center">—</td>
+                              {viewColumnsComputed.map((col) => (
+                                <td key={col} className="px-1 py-0.5 border border-gray-300 min-w-[120px] max-w-[200px]">
+                                  <input type="text" value={dataGridColumnFilters[col] ?? ''} onChange={(e) => { setDataGridColumnFilters((prev) => ({ ...prev, [col]: e.target.value })); setExcelViewPage(0); }} placeholder="Filter column..." className="w-full px-2 py-1 text-xs border border-gray-300 rounded bg-white placeholder-gray-400" title={`Filter ${col}`} />
+                                </td>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {pageData.map((row, i) => {
+                              const rowIndex = filteredData.indexOf(row);
+                              const actualRowIndex = fileData.indexOf(row);
+                              return (
+                                <tr key={rowIndex} className="hover:bg-[#e8f4ea]">
+                                  <td className="sticky left-0 z-10 w-12 min-w-12 px-2 py-1 text-center text-xs font-medium bg-[#f3f4f6] text-gray-600 border border-gray-300">{rowIndex + 1}</td>
+                                  {viewColumnsComputed.map((col) => (
+                                    <td key={col} className="px-2 py-1 text-sm border border-gray-300 min-w-[120px] max-w-[200px] bg-white">
+                                      {viewLoginColumnName && col === viewLoginColumnName && viewingFileId ? (
+                                        <select value={String(row[col] ?? '')} onChange={(e) => handleUpdateRowCell(actualRowIndex, col, e.target.value)} disabled={updatingRowCell === `${actualRowIndex}-${col}`} className="w-full px-1 py-0.5 border border-gray-300 rounded text-sm bg-white">
+                                          <option value="">— Select site —</option>
+                                          {siteList.map((s) => <option key={s.siteValue} value={s.siteValue}>{s.siteValue}</option>)}
+                                        </select>
+                                      ) : highlightAllSearchMatches(row[col], debouncedDataGridSearch)}
+                                    </td>
+                                  ))}
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                      {filteredData.length === 0 && <p className="text-gray-500 py-4">No rows (or no rows match the current search/filter).</p>}
+                    </>
+                  );
+                })()}
+              </div>
+            </div>
+          )}
+        </div>
+      ) : (
       <div className="max-w-7xl mx-auto">
         <div className="flex justify-between items-center mb-6">
           <h1 className="text-3xl font-bold">Created Excel Files</h1>
@@ -542,6 +877,10 @@ function CreatedExcelFilesComponent() {
 
         {/* Filter */}
         <div className="mb-4">
+          <label className="mr-2">Search:</label>
+          <input type="text" value={filesListSearch} onChange={(e) => setFilesListSearch(e.target.value)} placeholder="Filename, created by, labour type..." className="px-3 py-2 border border-gray-300 rounded-md text-sm w-56 focus:ring-1 focus:ring-blue-500" />
+          <button type="button" onClick={() => setFilesListSearch('')} className="px-3 py-2 bg-gray-200 text-gray-700 rounded-md hover:bg-gray-300 text-sm">Clear</button>
+          <span className="text-sm text-gray-500 mr-4">Showing {filteredFiles.length} file(s)</span>
           <label className="mr-2">Filter by Labour Type:</label>
           <select
             value={filterLabourType}
@@ -710,7 +1049,7 @@ function CreatedExcelFilesComponent() {
                     </td>
                     <td className="px-6 py-4 text-sm text-gray-900">
                       <div className="flex items-center gap-2">
-                        <span>{file.originalFilename}</span>
+                        <span>{highlightAllSearchMatches(file.originalFilename, filesListSearch)}</span>
                         {(file.mergeCount ?? 0) > 0 && (
                           <span 
                             className="flex items-center gap-0.5" 
@@ -730,8 +1069,8 @@ function CreatedExcelFilesComponent() {
                       </div>
                     </td>
                     <td className="px-6 py-4 text-sm text-gray-900">
-                      <div>{getCreatorName(file)}</div>
-                      <div className="text-xs text-gray-500">{getCreatorEmail(file)}</div>
+                      <div>{highlightAllSearchMatches(getCreatorName(file), filesListSearch)}</div>
+                      <div className="text-xs text-gray-500">{highlightAllSearchMatches(getCreatorEmail(file), filesListSearch)}</div>
                     </td>
                     <td className="px-6 py-4 text-sm">
                       <span className={`px-2 py-1 text-xs rounded-full ${
@@ -739,7 +1078,7 @@ function CreatedExcelFilesComponent() {
                         file.labourType === 'SUPPLY_LABOUR' ? 'bg-green-100 text-green-800' :
                         'bg-purple-100 text-purple-800'
                       }`}>
-                        {file.labourType.replace('_', ' ')}
+                        {highlightAllSearchMatches(file.labourType.replace('_', ' '), filesListSearch)}
                       </span>
                     </td>
                     <td className="px-6 py-4 text-sm text-gray-900">{file.rowCount}</td>
@@ -887,48 +1226,8 @@ function CreatedExcelFilesComponent() {
           </table>
         </div>
 
-        {/* View File Modal */}
-        {viewingFileId && fileData.length > 0 && (
-          <div className="bg-white rounded-lg shadow p-6 mt-6">
-            <div className="flex justify-between items-center mb-4">
-              <h2 className="text-xl font-semibold">View Excel File Data</h2>
-              <button
-                onClick={() => {
-                  setViewingFileId(null);
-                  setFileData([]);
-                }}
-                className="px-4 py-2 text-gray-600 hover:text-gray-800 border border-gray-300 rounded-md"
-              >
-                Close
-              </button>
-            </div>
-            <div className="overflow-x-auto max-h-96 overflow-y-auto">
-              <table className="min-w-full divide-y divide-gray-200">
-                <thead className="bg-gray-50 sticky top-0">
-                  <tr>
-                    {Object.keys(fileData[0] || {}).map((key) => (
-                      <th key={key} className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">
-                        {key}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody className="bg-white divide-y divide-gray-200">
-                  {fileData.map((row, idx) => (
-                    <tr key={idx} className="hover:bg-gray-50">
-                      {Object.values(row).map((value: any, colIdx) => (
-                        <td key={colIdx} className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                          {value || ''}
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
-      </div>
+        </div>
+      )}
 
       {/* Merge Filename Modal */}
       {showMergeFilenameModal && (

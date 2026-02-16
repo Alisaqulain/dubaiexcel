@@ -96,3 +96,19 @@ export function withUploadPermission(handler: (req: AuthenticatedRequest) => Pro
   });
 }
 
+/**
+ * Middleware for Project Head / Site login (user must have projectName in token from site login)
+ */
+export function withProjectHead(handler: (req: AuthenticatedRequest) => Promise<NextResponse>) {
+  return withAuth(async (req: AuthenticatedRequest) => {
+    const user = req.user as (JWTPayload & { projectName?: string }) | undefined;
+    if (!user?.projectName) {
+      return NextResponse.json(
+        { error: 'Project head / site access required' },
+        { status: 403 }
+      );
+    }
+    return handler(req);
+  });
+}
+

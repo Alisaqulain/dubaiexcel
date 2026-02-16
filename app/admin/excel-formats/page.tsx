@@ -1,10 +1,22 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { ProtectedRoute } from '../../components/ProtectedRoute';
 import Navigation from '../../components/Navigation';
 import { useAuth } from '../../context/AuthContext';
+import { highlightAllSearchMatches } from '../../components/HighlightSearch';
+import { useDebounce, SEARCH_DEBOUNCE_MS } from '@/lib/useDebounce';
 import * as XLSX from 'xlsx';
+
+function getColumnLetter(index: number): string {
+  let s = '';
+  let n = index;
+  while (n >= 0) {
+    s = String.fromCharCode(65 + (n % 26)) + s;
+    n = Math.floor(n / 26) - 1;
+  }
+  return s;
+}
 
 interface Column {
   name: string;
@@ -69,6 +81,11 @@ function ExcelFormatsComponent() {
   const [viewingFormatId, setViewingFormatId] = useState<string | null>(null);
   const [formatTemplateData, setFormatTemplateData] = useState<any[]>([]);
   const [viewingFormatColumns, setViewingFormatColumns] = useState<Column[]>([]);
+  const [viewFormatSearch, setViewFormatSearch] = useState('');
+  const debouncedViewFormatSearch = useDebounce(viewFormatSearch, SEARCH_DEBOUNCE_MS);
+  const [formatsListSearch, setFormatsListSearch] = useState('');
+  const debouncedFormatsListSearch = useDebounce(formatsListSearch, SEARCH_DEBOUNCE_MS);
+  const [submitting, setSubmitting] = useState(false);
   const [formData, setFormData] = useState({
     name: '',
     description: '',
@@ -766,6 +783,7 @@ function ExcelFormatsComponent() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submitting) return;
     if (!formData.name || formData.columns.length === 0) {
       alert('Please provide format name and at least one column');
       return;
@@ -776,6 +794,7 @@ function ExcelFormatsComponent() {
       return;
     }
 
+    setSubmitting(true);
     try {
       const url = editingFormat 
         ? `/api/admin/excel-formats/${editingFormat._id}`
@@ -850,6 +869,8 @@ function ExcelFormatsComponent() {
       }
     } catch (err: any) {
       alert(err.message || 'Failed to save format');
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -1068,6 +1089,76 @@ function ExcelFormatsComponent() {
 
   return (
     <div className="min-h-screen bg-gray-50 p-6">
+      {viewingFormatId ? (
+        /* Full-screen Format Template Data view (no popup) */
+        <div className="h-[calc(100vh-6rem)] flex flex-col bg-white rounded-lg shadow-lg border border-gray-200 overflow-hidden">
+          <div className="flex justify-between items-center px-4 py-3 border-b border-gray-200 bg-[#f8f9fa] shrink-0 flex-wrap gap-3">
+            <button
+              type="button"
+              onClick={() => { setViewingFormatId(null); setFormatTemplateData([]); setViewingFormatColumns([]); setViewFormatSearch(''); }}
+              className="px-3 py-1.5 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded hover:bg-gray-50"
+            >
+              ← Back to list
+            </button>
+            <h2 className="text-xl font-bold text-gray-800">Format Template Data</h2>
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                value={viewFormatSearch}
+                onChange={(e) => setViewFormatSearch(e.target.value)}
+                placeholder="Search in data..."
+                className="px-3 py-1.5 border border-gray-300 rounded text-sm w-52 focus:ring-1 focus:ring-blue-500"
+              />
+              {viewFormatSearch && (
+                <button type="button" onClick={() => setViewFormatSearch('')} className="px-2 py-1.5 text-sm bg-gray-200 rounded hover:bg-gray-300">Clear</button>
+              )}
+            </div>
+          </div>
+          <div className="p-4 overflow-auto flex-1 bg-[#e2e8f0]">
+            {formatTemplateData.length === 0 ? (
+              <div className="text-center py-8 text-gray-500">No template data available for this format.</div>
+            ) : (() => {
+              const sortedCols = [...viewingFormatColumns].sort((a, b) => a.order - b.order);
+              const q = debouncedViewFormatSearch.trim().toLowerCase();
+              const filteredRows = q ? formatTemplateData.filter((row) => sortedCols.some((col) => String(row[col.name] ?? '').toLowerCase().includes(q))) : formatTemplateData;
+              return (
+                <div className="inline-block min-w-full border border-gray-300 bg-white shadow-sm" style={{ fontFamily: 'Calibri, Arial, sans-serif' }}>
+                  <table className="border-collapse" style={{ tableLayout: 'fixed', minWidth: 'max-content' }}>
+                    <thead>
+                      <tr>
+                        <th className="sticky left-0 top-0 z-20 w-12 min-w-12 px-2 py-1.5 text-center text-xs font-semibold bg-[#217346] text-white border border-gray-400 shadow-sm" />
+                        {sortedCols.map((col, idx) => (
+                          <th key={col.name} className="sticky top-0 z-10 min-w-[120px] max-w-[200px] px-2 py-1.5 text-left text-xs font-semibold bg-[#217346] text-white border border-gray-400 whitespace-nowrap">
+                            <span className="text-[10px] text-gray-200 mr-1">{getColumnLetter(idx)}</span>
+                            {col.name}
+                            {col.required && <span className="text-red-300 ml-0.5">*</span>}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredRows.map((row, rowIndex) => (
+                        <tr key={rowIndex} className="hover:bg-[#e8f4ea]">
+                          <td className="sticky left-0 z-10 w-12 min-w-12 px-2 py-1 text-center text-xs font-medium bg-[#f3f4f6] text-gray-600 border border-gray-300">{rowIndex + 1}</td>
+                          {sortedCols.map((col) => (
+                            <td key={col.name} className={`px-2 py-1 text-sm border border-gray-300 min-w-[120px] max-w-[200px] ${col.editable === false ? 'bg-[#f9fafb]' : 'bg-white'}`}>
+                              {highlightAllSearchMatches(formatCellValueForDisplay(row[col.name], col.type), debouncedViewFormatSearch)}
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {filteredRows.length === 0 && <p className="text-gray-500 py-4 text-center">No rows match search.</p>}
+                </div>
+              );
+            })()}
+          </div>
+          <div className="p-4 border-t flex justify-between items-center bg-[#f8f9fa] shrink-0">
+            <span className="text-sm text-gray-600">Total Rows: <strong>{formatTemplateData.length}</strong> | Total Columns: <strong>{viewingFormatColumns.length}</strong>{debouncedViewFormatSearch && ' (filtered by search)'}</span>
+          </div>
+        </div>
+      ) : (
       <div className="max-w-7xl mx-auto">
         <div className="flex justify-between items-center mb-6">
           <h1 className="text-3xl font-bold">Excel Format Management</h1>
@@ -1482,9 +1573,10 @@ function ExcelFormatsComponent() {
               <div className="flex gap-2">
                 <button
                   type="submit"
-                  className="px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
+                  disabled={submitting}
+                  className="px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  {editingFormat ? 'Update Format' : 'Create Format'}
+                  {submitting ? 'Saving...' : (editingFormat ? 'Update Format' : 'Create Format')}
                 </button>
                 <button
                   type="button"
@@ -1505,6 +1597,14 @@ function ExcelFormatsComponent() {
 
         <div className="bg-white rounded-lg shadow">
           <h2 className="text-xl font-semibold p-6 border-b">Existing Formats</h2>
+          {formats.length > 0 && (
+            <div className="px-6 pb-3 flex items-center gap-2">
+              <label className="text-sm font-medium text-gray-700">Search:</label>
+              <input type="text" value={formatsListSearch} onChange={(e) => setFormatsListSearch(e.target.value)} placeholder="Search by name or description..." className="px-3 py-2 border border-gray-300 rounded-md text-sm w-64" />
+              <button type="button" onClick={() => setFormatsListSearch('')} className="px-3 py-2 bg-gray-200 rounded-md text-sm hover:bg-gray-300">Clear</button>
+              <span className="text-sm text-gray-500">Showing {formats.filter((f) => !debouncedFormatsListSearch.trim() || [f.name, f.description].some((v) => String(v || '').toLowerCase().includes(debouncedFormatsListSearch.trim().toLowerCase()))).length} of {formats.length}</span>
+            </div>
+          )}
           {formats.length === 0 ? (
             <div className="p-6 text-center text-gray-500">No formats created yet</div>
           ) : (
@@ -1520,7 +1620,7 @@ function ExcelFormatsComponent() {
                   </tr>
                 </thead>
                 <tbody className="bg-white divide-y divide-gray-200">
-                  {formats.map((format) => (
+                  {formats.filter((f) => !debouncedFormatsListSearch.trim() || [f.name, f.description].some((v) => String(v || '').toLowerCase().includes(debouncedFormatsListSearch.trim().toLowerCase()))).map((format) => (
                     <tr key={format._id} className="hover:bg-gray-50">
                       <td className="px-6 py-4">
                         <div className="font-medium text-gray-900">{format.name}</div>
@@ -1604,98 +1704,8 @@ function ExcelFormatsComponent() {
           )}
         </div>
 
-        {/* View Format Template Data Modal */}
-        {viewingFormatId && (
-          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-            <div className="bg-white rounded-lg shadow-xl max-w-7xl w-full max-h-[90vh] flex flex-col">
-              <div className="flex justify-between items-center p-6 border-b">
-                <h2 className="text-2xl font-bold">Format Template Data</h2>
-                <button
-                  onClick={() => {
-                    setViewingFormatId(null);
-                    setFormatTemplateData([]);
-                    setViewingFormatColumns([]);
-                  }}
-                  className="text-gray-500 hover:text-gray-700 text-2xl font-bold"
-                >
-                  ×
-                </button>
-              </div>
-              <div className="p-6 overflow-auto flex-1">
-                {formatTemplateData.length === 0 ? (
-                  <div className="text-center py-8 text-gray-500">
-                    No template data available for this format.
-                  </div>
-                ) : (
-                  <div className="overflow-x-auto">
-                    <table className="min-w-full divide-y divide-gray-200 border border-gray-300">
-                      <thead className="bg-gray-50 sticky top-0">
-                        <tr>
-                          <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase border border-gray-300 bg-gray-100">
-                            #
-                          </th>
-                          {viewingFormatColumns
-                            .sort((a, b) => a.order - b.order)
-                            .map((col) => (
-                              <th
-                                key={col.name}
-                                className="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase border border-gray-300 bg-gray-100 whitespace-nowrap"
-                              >
-                                {col.name}
-                                {col.required && <span className="text-red-500 ml-1">*</span>}
-                                <div className="text-xs font-normal text-gray-500 mt-1">
-                                  {col.type}
-                                  {col.editable === false && <span className="text-red-600 ml-1">(Read-only)</span>}
-                                  {col.unique && <span className="text-blue-600 ml-1">(Unique)</span>}
-                                </div>
-                              </th>
-                            ))}
-                        </tr>
-                      </thead>
-                      <tbody className="bg-white divide-y divide-gray-200">
-                        {formatTemplateData.map((row, rowIndex) => (
-                          <tr key={rowIndex} className="hover:bg-gray-50">
-                            <td className="px-4 py-3 text-sm font-medium text-gray-500 border border-gray-300">
-                              {rowIndex + 1}
-                            </td>
-                            {viewingFormatColumns
-                              .sort((a, b) => a.order - b.order)
-                              .map((col) => (
-                                <td
-                                  key={col.name}
-                                  className={`px-4 py-3 text-sm border border-gray-300 ${
-                                    col.editable === false ? 'bg-gray-50' : ''
-                                  }`}
-                                >
-                                  {formatCellValueForDisplay(row[col.name], col.type)}
-                                </td>
-                              ))}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-              </div>
-              <div className="p-6 border-t flex justify-between items-center">
-                <div className="text-sm text-gray-600">
-                  Total Rows: <strong>{formatTemplateData.length}</strong> | Total Columns: <strong>{viewingFormatColumns.length}</strong>
-                </div>
-                <button
-                  onClick={() => {
-                    setViewingFormatId(null);
-                    setFormatTemplateData([]);
-                    setViewingFormatColumns([]);
-                  }}
-                  className="px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700"
-                >
-                  Close
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
       </div>
+      )}
     </div>
   );
 }

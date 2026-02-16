@@ -52,9 +52,18 @@ export default function Navigation() {
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex justify-between h-16">
           <div className="flex">
-            <Link href="/dashboard" className="flex items-center px-3 py-2 rounded-md text-sm font-medium hover:bg-blue-700">
+            <Link href="/dashboard" className={`flex items-center px-3 py-2 rounded-md text-sm font-medium ${isActive('/dashboard') ? 'bg-blue-800' : 'hover:bg-blue-700'}`}>
               Dashboard
             </Link>
+            {/* Format View - for admin & super-admin, right after Dashboard */}
+            {(user.role === 'super-admin' || user.role === 'admin') && (
+              <Link
+                href="/admin/format-view"
+                className={`flex items-center px-3 py-2 rounded-md text-sm font-medium ${isActive('/admin/format-view') ? 'bg-blue-800' : 'hover:bg-blue-700'}`}
+              >
+                Format View
+              </Link>
+            )}
             {/* Super Admin & Admin Navigation */}
             {(user.role === 'super-admin' || user.role === 'admin') && (
               <>

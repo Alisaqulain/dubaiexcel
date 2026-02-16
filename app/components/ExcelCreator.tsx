@@ -1,7 +1,8 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useAuth } from '../context/AuthContext';
+import { useDebounce, SEARCH_DEBOUNCE_MS } from '@/lib/useDebounce';
 import * as XLSX from 'xlsx';
 
 interface ExcelRow {
@@ -50,6 +51,9 @@ export default function ExcelCreator({ labourType, onFileCreated, onSaveAndClose
   const [templateRows, setTemplateRows] = useState<Record<string, any>[]>([]); // Store template rows for read-only column validation
   const [loadingFormat, setLoadingFormat] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [tablePage, setTablePage] = useState(1);
+  const [rowSearch, setRowSearch] = useState('');
+  const debouncedRowSearch = useDebounce(rowSearch, SEARCH_DEBOUNCE_MS);
   // Track current editing file ID - clears after save so next save creates new file
   const [currentEditingFileId, setCurrentEditingFileId] = useState<string | undefined>(editingFileId);
   
@@ -57,6 +61,12 @@ export default function ExcelCreator({ labourType, onFileCreated, onSaveAndClose
   useEffect(() => {
     setCurrentEditingFileId(editingFileId);
   }, [editingFileId]);
+
+  const ROWS_PER_PAGE = 50;
+  const totalTablePages = Math.max(1, Math.ceil(rows.length / ROWS_PER_PAGE));
+  useEffect(() => {
+    if (tablePage > totalTablePages) setTablePage(totalTablePages);
+  }, [rows.length, totalTablePages, tablePage]);
 
   // Reset rows when initialData or editingFileId changes (when editing a different file or starting fresh)
   useEffect(() => {
@@ -131,18 +141,26 @@ export default function ExcelCreator({ labourType, onFileCreated, onSaveAndClose
           if (result.success && result.data) {
             setCustomFormat(result.data);
             
-            // Store template rows for read-only column validation
-            if (result.data.templateRows && result.data.templateRows.length > 0) {
-              setTemplateRows(result.data.templateRows);
-              // If no initial data, populate with template rows
+            // Store template rows (API sends max 250 to avoid lag); use for read-only validation
+            const loadedRows = result.data.templateRows || [];
+            const totalCount = result.data.templateRowCount ?? loadedRows.length;
+            if (loadedRows.length > 0) {
+              setTemplateRows(loadedRows);
               if (!initialData || initialData.length === 0) {
-                setRows(result.data.templateRows);
+                setRows(loadedRows);
               }
             } else {
               setTemplateRows([]);
             }
             
-            setMessage(null);
+            if (totalCount > 250) {
+              setMessage({
+                type: 'success',
+                text: `Template has ${totalCount} rows. Loaded first 250 for quick editing. Use "Download Template" to get the full file, or add more rows as needed.`,
+              });
+            } else {
+              setMessage(null);
+            }
           } else {
             // No format assigned - show error
             setMessage({ 
@@ -804,6 +822,30 @@ export default function ExcelCreator({ labourType, onFileCreated, onSaveAndClose
         </div>
       ) : (
         <>
+          <div className="mb-3 p-3 bg-white border border-gray-200 rounded-lg shadow-sm">
+            <label className="block text-sm font-semibold text-gray-700 mb-2">Search rows</label>
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                type="text"
+                value={rowSearch}
+                onChange={(e) => { setRowSearch(e.target.value); setTablePage(1); }}
+                placeholder="Search in all columns..."
+                className="px-3 py-2 border border-gray-300 rounded-md text-sm w-64 focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+              />
+              <button
+                type="button"
+                onClick={() => { setRowSearch(''); setTablePage(1); }}
+                className="px-3 py-2 text-sm bg-gray-200 text-gray-700 rounded-md hover:bg-gray-300"
+              >
+                Clear
+              </button>
+              <span className="text-sm text-gray-600">
+                {debouncedRowSearch.trim()
+                  ? `Showing ${rows.filter((r) => columns.some((col) => String(r[col.name] ?? '').toLowerCase().includes(debouncedRowSearch.trim().toLowerCase()))).length} of ${rows.length} rows`
+                  : `${rows.length} row(s)`}
+              </span>
+            </div>
+          </div>
           <div className="overflow-x-auto mb-4 shadow-sm rounded-lg border border-gray-200 bg-white">
             <table className="min-w-full divide-y divide-gray-200" style={{ tableLayout: 'auto' }}>
               <thead className="bg-gray-50 sticky top-0 z-10">
@@ -826,7 +868,47 @@ export default function ExcelCreator({ labourType, onFileCreated, onSaveAndClose
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
-                {rows.map((row, rowIndex) => (
+                {(() => {
+                  const filteredRows = debouncedRowSearch.trim()
+                    ? rows.filter((r) =>
+                        columns.some((col) =>
+                          String(r[col.name] ?? '').toLowerCase().includes(debouncedRowSearch.trim().toLowerCase())
+                        )
+                      )
+                    : rows;
+                  const totalPages = Math.max(1, Math.ceil(filteredRows.length / ROWS_PER_PAGE));
+                  const safePage = Math.min(tablePage, totalPages);
+                  const start = (safePage - 1) * ROWS_PER_PAGE;
+                  const pageRows = filteredRows.slice(start, start + ROWS_PER_PAGE);
+                  return (
+                    <>
+                      {(filteredRows.length > ROWS_PER_PAGE || debouncedRowSearch.trim()) && (
+                        <tr>
+                          <td colSpan={columns.length + 2} className="px-4 py-2 bg-gray-50 border-b text-sm">
+                            <div className="flex items-center justify-between">
+                              <span className="text-gray-600">
+                                Rows {start + 1}–{start + pageRows.length} of {filteredRows.length}
+                                {debouncedRowSearch.trim() && ` (filtered from ${rows.length})`}
+                              </span>
+                              <div className="flex gap-2">
+                                <button type="button" onClick={() => setTablePage(p => Math.max(1, p - 1))} disabled={safePage <= 1} className="px-3 py-1 border border-gray-300 rounded bg-white text-sm disabled:opacity-50">Previous</button>
+                                <span className="py-1 text-gray-600">Page {safePage} of {totalPages}</span>
+                                <button type="button" onClick={() => setTablePage(p => Math.min(totalPages, p + 1))} disabled={safePage >= totalPages} className="px-3 py-1 border border-gray-300 rounded bg-white text-sm disabled:opacity-50">Next</button>
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                      {filteredRows.length === 0 ? (
+                        <tr>
+                          <td colSpan={columns.length + 2} className="px-4 py-6 text-center text-gray-500">
+                            No rows match the search.
+                          </td>
+                        </tr>
+                      ) : (
+                      pageRows.map((row, idx) => {
+                        const rowIndex = rows.indexOf(row);
+                        return (
                   <tr key={rowIndex} className="hover:bg-gray-50 transition-colors">
                     <td className="px-4 py-3 text-sm font-medium text-gray-500 whitespace-nowrap">{rowIndex + 1}</td>
                     {columns.map((col) => {
@@ -881,7 +963,12 @@ export default function ExcelCreator({ labourType, onFileCreated, onSaveAndClose
                       </button>
                     </td>
                   </tr>
-                ))}
+                );
+                      })
+                      )}
+                    </>
+                  );
+                })()}
               </tbody>
             </table>
           </div>
