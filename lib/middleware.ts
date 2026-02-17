@@ -111,4 +111,3 @@ export function withProjectHead(handler: (req: AuthenticatedRequest) => Promise<
     return handler(req);
   });
 }
-

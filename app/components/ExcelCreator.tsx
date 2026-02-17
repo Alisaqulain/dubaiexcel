@@ -5,6 +5,16 @@ import { useAuth } from '../context/AuthContext';
 import { useDebounce, SEARCH_DEBOUNCE_MS } from '@/lib/useDebounce';
 import * as XLSX from 'xlsx';
 
+function getColumnLetter(index: number): string {
+  let s = '';
+  let n = index;
+  while (n >= 0) {
+    s = String.fromCharCode(65 + (n % 26)) + s;
+    n = Math.floor(n / 26) - 1;
+  }
+  return s;
+}
+
 interface ExcelRow {
   [key: string]: string | number;
 }
@@ -62,11 +72,9 @@ export default function ExcelCreator({ labourType, onFileCreated, onSaveAndClose
     setCurrentEditingFileId(editingFileId);
   }, [editingFileId]);
 
-  const ROWS_PER_PAGE = 50;
-  const totalTablePages = Math.max(1, Math.ceil(rows.length / ROWS_PER_PAGE));
   useEffect(() => {
-    if (tablePage > totalTablePages) setTablePage(totalTablePages);
-  }, [rows.length, totalTablePages, tablePage]);
+    if (tablePage < 1) setTablePage(1);
+  }, [rows.length, tablePage]);
 
   // Reset rows when initialData or editingFileId changes (when editing a different file or starting fresh)
   useEffect(() => {
@@ -846,28 +854,28 @@ export default function ExcelCreator({ labourType, onFileCreated, onSaveAndClose
               </span>
             </div>
           </div>
-          <div className="overflow-x-auto mb-4 shadow-sm rounded-lg border border-gray-200 bg-white">
-            <table className="min-w-full divide-y divide-gray-200" style={{ tableLayout: 'auto' }}>
-              <thead className="bg-gray-50 sticky top-0 z-10">
+          <div className="overflow-auto mb-4 border border-gray-300 bg-white max-h-[70vh] shadow-sm" style={{ fontFamily: 'Calibri, Arial, sans-serif' }}>
+            <table className="min-w-full border-collapse" style={{ tableLayout: 'auto' }}>
+              <thead className="sticky top-0 z-20 bg-[#217346]">
                 <tr>
-                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider whitespace-nowrap min-w-[50px]">#</th>
-                  {columns.map((col) => {
-                    // Calculate minimum width based on column name length - more generous sizing
-                    const minWidth = Math.max(180, Math.min(col.name.length * 12 + 60, 300));
+                  <th className="px-2 py-1.5 text-center text-xs font-semibold text-white border border-gray-400 whitespace-nowrap w-12">#</th>
+                  {columns.map((col, colIdx) => {
+                    const minWidth = Math.max(100, Math.min(col.name.length * 8 + 40, 260));
                     return (
-                      <th 
-                        key={col.name} 
-                        className="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider"
-                        style={{ minWidth: `${minWidth}px`, maxWidth: '400px' }}
+                      <th
+                        key={col.name}
+                        className="px-2 py-1.5 text-left text-xs font-semibold text-white border border-gray-400 whitespace-nowrap"
+                        style={{ minWidth: `${minWidth}px` }}
                       >
-                        <div className="break-words">{col.name}</div>
+                        <span className="text-[10px] text-gray-200 mr-1">{getColumnLetter(colIdx)}</span>
+                        {col.name}
                       </th>
                     );
                   })}
-                  <th className="px-4 py-3 text-left text-xs font-semibold text-gray-700 uppercase tracking-wider whitespace-nowrap min-w-[100px]">Actions</th>
+                  <th className="px-2 py-1.5 text-left text-xs font-semibold text-white border border-gray-400 whitespace-nowrap w-20">Actions</th>
                 </tr>
               </thead>
-              <tbody className="bg-white divide-y divide-gray-200">
+              <tbody className="bg-white">
                 {(() => {
                   const filteredRows = debouncedRowSearch.trim()
                     ? rows.filter((r) =>
@@ -876,102 +884,77 @@ export default function ExcelCreator({ labourType, onFileCreated, onSaveAndClose
                         )
                       )
                     : rows;
-                  const totalPages = Math.max(1, Math.ceil(filteredRows.length / ROWS_PER_PAGE));
-                  const safePage = Math.min(tablePage, totalPages);
-                  const start = (safePage - 1) * ROWS_PER_PAGE;
-                  const pageRows = filteredRows.slice(start, start + ROWS_PER_PAGE);
-                  return (
-                    <>
-                      {(filteredRows.length > ROWS_PER_PAGE || debouncedRowSearch.trim()) && (
-                        <tr>
-                          <td colSpan={columns.length + 2} className="px-4 py-2 bg-gray-50 border-b text-sm">
-                            <div className="flex items-center justify-between">
-                              <span className="text-gray-600">
-                                Rows {start + 1}–{start + pageRows.length} of {filteredRows.length}
-                                {debouncedRowSearch.trim() && ` (filtered from ${rows.length})`}
-                              </span>
-                              <div className="flex gap-2">
-                                <button type="button" onClick={() => setTablePage(p => Math.max(1, p - 1))} disabled={safePage <= 1} className="px-3 py-1 border border-gray-300 rounded bg-white text-sm disabled:opacity-50">Previous</button>
-                                <span className="py-1 text-gray-600">Page {safePage} of {totalPages}</span>
-                                <button type="button" onClick={() => setTablePage(p => Math.min(totalPages, p + 1))} disabled={safePage >= totalPages} className="px-3 py-1 border border-gray-300 rounded bg-white text-sm disabled:opacity-50">Next</button>
-                              </div>
-                            </div>
-                          </td>
-                        </tr>
-                      )}
-                      {filteredRows.length === 0 ? (
-                        <tr>
-                          <td colSpan={columns.length + 2} className="px-4 py-6 text-center text-gray-500">
-                            No rows match the search.
-                          </td>
-                        </tr>
-                      ) : (
-                      pageRows.map((row, idx) => {
-                        const rowIndex = rows.indexOf(row);
-                        return (
-                  <tr key={rowIndex} className="hover:bg-gray-50 transition-colors">
-                    <td className="px-4 py-3 text-sm font-medium text-gray-500 whitespace-nowrap">{rowIndex + 1}</td>
-                    {columns.map((col) => {
-                      const isReadOnly = col.editable === false;
-                      const minWidth = Math.max(180, Math.min(col.name.length * 12 + 60, 300));
+                  return filteredRows.length === 0 ? (
+                    <tr>
+                      <td colSpan={columns.length + 2} className="px-4 py-6 text-center text-gray-500 border border-gray-300">
+                        No rows match the search.
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredRows.map((row) => {
+                      const rowIndex = rows.indexOf(row);
                       return (
-                        <td key={col.name} className={`px-4 py-3 ${isReadOnly ? 'bg-gray-50' : ''}`} style={{ minWidth: `${minWidth}px`, maxWidth: '400px' }}>
-                          {col.type === 'dropdown' && col.validation?.options ? (
-                            <select
-                              value={row[col.name] || ''}
-                              onChange={(e) => updateCell(rowIndex, col.name, e.target.value)}
-                              className={`w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all ${isReadOnly ? 'bg-gray-200 cursor-not-allowed' : 'bg-white hover:border-gray-400'}`}
-                              required={col.required}
-                              disabled={isReadOnly}
-                              title={isReadOnly ? 'This column is read-only' : ''}
-                              style={{ minWidth: '120px' }}
+                        <tr key={rowIndex} className="hover:bg-[#e8f4ea]">
+                          <td className="px-2 py-1 text-center text-xs font-medium text-gray-600 border border-gray-300 bg-[#f3f4f6] w-12">{rowIndex + 1}</td>
+                          {columns.map((col) => {
+                            const isReadOnly = col.editable === false;
+                            const minWidth = Math.max(100, Math.min(col.name.length * 8 + 40, 260));
+                            return (
+                              <td key={col.name} className={`p-0 align-top ${isReadOnly ? 'bg-gray-50' : ''}`} style={{ minWidth: `${minWidth}px` }}>
+                                {col.type === 'dropdown' && col.validation?.options ? (
+                                  <select
+                                    value={row[col.name] || ''}
+                                    onChange={(e) => updateCell(rowIndex, col.name, e.target.value)}
+                                    className={`w-full h-full min-h-[28px] px-2 py-1 border-0 border-r border-b border-gray-300 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500 ${isReadOnly ? 'bg-gray-200 cursor-not-allowed' : 'bg-white'}`}
+                                    required={col.required}
+                                    disabled={isReadOnly}
+                                    title={isReadOnly ? 'Read-only' : ''}
+                                  >
+                                    <option value="">Select...</option>
+                                    {col.validation.options.map(opt => (
+                                      <option key={opt} value={opt}>{opt}</option>
+                                    ))}
+                                  </select>
+                                ) : (
+                                  <input
+                                    type={col.type === 'number' ? 'number' : col.type === 'date' ? 'date' : col.type === 'email' ? 'email' : 'text'}
+                                    value={row[col.name] || ''}
+                                    onChange={(e) => updateCell(rowIndex, col.name, e.target.value)}
+                                    className={`w-full min-h-[28px] px-2 py-1 border-0 border-r border-b border-gray-300 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500 ${isReadOnly ? 'bg-gray-200 cursor-not-allowed' : 'bg-white'}`}
+                                    placeholder={col.name}
+                                    required={col.required}
+                                    disabled={isReadOnly}
+                                    readOnly={isReadOnly}
+                                    title={isReadOnly ? 'Read-only' : ''}
+                                    min={col.type === 'number' ? col.validation?.min : undefined}
+                                    max={col.type === 'number' ? col.validation?.max : undefined}
+                                  />
+                                )}
+                              </td>
+                            );
+                          })}
+                          <td className="px-2 py-1 border border-gray-300 bg-white w-20 align-top">
+                            <button
+                              type="button"
+                              onClick={() => removeRow(rowIndex)}
+                              className="px-2 py-1 text-xs font-medium text-red-600 hover:text-red-800 hover:bg-red-50"
                             >
-                              <option value="">Select...</option>
-                              {col.validation.options.map(opt => (
-                                <option key={opt} value={opt}>{opt}</option>
-                              ))}
-                            </select>
-                          ) : (
-                            <input
-                              type={col.type === 'number' ? 'number' : col.type === 'date' ? 'date' : col.type === 'email' ? 'email' : 'text'}
-                              value={row[col.name] || ''}
-                              onChange={(e) => updateCell(rowIndex, col.name, e.target.value)}
-                              className={`w-full px-3 py-2.5 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all ${isReadOnly ? 'bg-gray-200 cursor-not-allowed' : 'bg-white hover:border-gray-400'}`}
-                              placeholder={`Enter ${col.name}${col.type === 'number' && col.validation ? ` (${col.validation.min || 0}-${col.validation.max || '∞'})` : ''}`}
-                              required={col.required}
-                              disabled={isReadOnly}
-                              readOnly={isReadOnly}
-                              title={isReadOnly ? 'This column is read-only' : ''}
-                              min={col.type === 'number' ? col.validation?.min : undefined}
-                              max={col.type === 'number' ? col.validation?.max : undefined}
-                              style={{ 
-                                minWidth: col.type === 'text' || col.type === 'email' ? '180px' : col.type === 'date' ? '160px' : '120px',
-                                fontSize: '14px'
-                              }}
-                            />
-                          )}
-                        </td>
+                              Remove
+                            </button>
+                          </td>
+                        </tr>
                       );
-                    })}
-                    <td className="px-4 py-3 whitespace-nowrap">
-                      <button
-                        type="button"
-                        onClick={() => removeRow(rowIndex)}
-                        className="px-3 py-1.5 text-sm font-medium text-red-600 hover:text-red-800 hover:bg-red-50 rounded-md transition-colors"
-                      >
-                        Remove
-                      </button>
-                    </td>
-                  </tr>
-                );
-                      })
-                      )}
-                    </>
+                    })
                   );
                 })()}
               </tbody>
             </table>
           </div>
+          <p className="text-sm text-gray-500 mt-1">
+            {debouncedRowSearch.trim()
+              ? `Showing ${rows.filter((r) => columns.some((col) => String(r[col.name] ?? '').toLowerCase().includes(debouncedRowSearch.trim().toLowerCase()))).length} of ${rows.length} rows — scroll to see all`
+              : `${rows.length} row(s) — scroll to see all`}
+          </p>
           <div className="flex justify-end gap-2">
             <button
               type="button"
