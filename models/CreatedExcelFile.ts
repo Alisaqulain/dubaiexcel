@@ -16,6 +16,8 @@ export interface ICreatedExcelFile extends Document {
   lastEditedAt?: Date; // Date when file was last edited
   lastEditedBy?: mongoose.Types.ObjectId; // User who last edited the file
   lastEditedByName?: string; // Name of user who last edited
+  formatId?: mongoose.Types.ObjectId; // When file was created from "Save my pick", the source format
+  pickedTemplateRowIndices?: number[]; // Template row indices that were picked (for "Original excel")
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -40,6 +42,8 @@ const CreatedExcelFileSchema = new Schema<ICreatedExcelFile>({
   lastEditedAt: { type: Date },
   lastEditedBy: { type: Schema.Types.ObjectId, ref: 'User' },
   lastEditedByName: { type: String },
+  formatId: { type: Schema.Types.ObjectId, ref: 'ExcelFormat' },
+  pickedTemplateRowIndices: [{ type: Number }],
 }, {
   timestamps: true,
 });

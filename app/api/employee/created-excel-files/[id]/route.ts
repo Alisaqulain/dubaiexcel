@@ -65,6 +65,8 @@ async function handleGetMyCreatedFile(
         createdAt: file.createdAt,
         updatedAt: file.updatedAt,
         data: jsonData, // The actual Excel data
+        formatId: file.formatId?.toString?.() ?? undefined,
+        pickedTemplateRowIndices: Array.isArray(file.pickedTemplateRowIndices) ? file.pickedTemplateRowIndices : undefined,
       },
     });
   } catch (error: any) {

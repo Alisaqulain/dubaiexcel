@@ -6,6 +6,7 @@ import User from '@/models/User';
 import Employee from '@/models/Employee';
 import ExcelFormat from '@/models/ExcelFormat';
 import FormatTemplateData from '@/models/FormatTemplateData';
+import PickedTemplateRow from '@/models/PickedTemplateRow';
 import * as XLSX from 'xlsx';
 import mongoose from 'mongoose';
 
@@ -60,6 +61,17 @@ async function handleSaveExcel(req: AuthenticatedRequest) {
     const file = formData.get('file') as File;
     const labourType = formData.get('labourType') as string;
     const rowCount = parseInt(formData.get('rowCount') as string) || 0;
+    const isPickSave = formData.get('isPickSave') === 'true' || formData.get('isPickSave') === '1';
+    const pickFormatId = formData.get('formatId') as string;
+    let pickRowIndices: number[] = [];
+    try {
+      const raw = formData.get('rowIndices') as string;
+      if (raw) pickRowIndices = JSON.parse(raw);
+      if (!Array.isArray(pickRowIndices)) pickRowIndices = [];
+      pickRowIndices = pickRowIndices.filter((i: number) => typeof i === 'number' && i >= 0);
+    } catch {
+      pickRowIndices = [];
+    }
 
     if (!file) {
       return NextResponse.json(
@@ -107,6 +119,45 @@ async function handleSaveExcel(req: AuthenticatedRequest) {
       return NextResponse.json(
         { error: 'No format assigned to you. Please contact administrator to assign a format before saving files.' },
         { status: 403 }
+      );
+    }
+
+    // If "Save my pick": register picked rows (one row = one employee; others cannot pick until released)
+    if (isPickSave && pickFormatId && pickRowIndices.length > 0) {
+      const assignedFormatIdStr = (assignedFormat as any)._id.toString();
+      if (pickFormatId !== assignedFormatIdStr) {
+        return NextResponse.json(
+          { error: 'Format does not match your assigned format.' },
+          { status: 403 }
+        );
+      }
+      const formatIdObj = new mongoose.Types.ObjectId(pickFormatId);
+      const existing = await PickedTemplateRow.find({
+        formatId: formatIdObj,
+        rowIndex: { $in: pickRowIndices },
+      }).lean();
+      const takenByOther = existing.filter((p: any) => p.pickedBy.toString() !== userId);
+      if (takenByOther.length > 0) {
+        const rows = Array.from(new Set(takenByOther.map((p: any) => p.rowIndex + 1))).sort((a, b) => a - b);
+        const first = takenByOther[0];
+        const msg = (first as any).empName
+          ? `Row(s) ${rows.join(', ')} are already picked by ${(first as any).empName} (ID: ${(first as any).empId}). If you want that row, that employee should release it; after that you can pick it.`
+          : `Row(s) ${rows.join(', ')} are already picked by another employee. Only one employee can pick each row.`;
+        return NextResponse.json(
+          { error: msg, validationError: true, pickedRows: rows },
+          { status: 400 }
+        );
+      }
+      const empId = userEmail ?? '';
+      const empName = userName ?? 'Unknown';
+      await PickedTemplateRow.bulkWrite(
+        pickRowIndices.map((rowIndex: number) => ({
+          updateOne: {
+            filter: { formatId: formatIdObj, rowIndex },
+            update: { $set: { pickedBy: userIdObj, empId, empName } },
+            upsert: true,
+          },
+        }))
       );
     }
 
@@ -387,6 +438,22 @@ async function handleSaveExcel(req: AuthenticatedRequest) {
       existingFile.lastEditedAt = new Date();
       existingFile.lastEditedBy = userIdObj;
       existingFile.lastEditedByName = userName;
+      // When updating a pick file, allow updating formatId and pickedTemplateRowIndices (e.g. after "Add data from file")
+      const updateFormatId = formData.get('formatId') as string;
+      const updateRowIndicesRaw = formData.get('rowIndices') as string;
+      if (updateFormatId) {
+        existingFile.formatId = new mongoose.Types.ObjectId(updateFormatId);
+      }
+      if (updateRowIndicesRaw) {
+        try {
+          const parsed = JSON.parse(updateRowIndicesRaw);
+          existingFile.pickedTemplateRowIndices = Array.isArray(parsed)
+            ? parsed.filter((i: number) => typeof i === 'number' && i >= 0)
+            : existingFile.pickedTemplateRowIndices;
+        } catch {
+          // keep existing
+        }
+      }
       await existingFile.save();
 
       // Find all merged files that include this file in their mergedFrom array
@@ -547,8 +614,7 @@ async function handleSaveExcel(req: AuthenticatedRequest) {
         mergedFilesUpdated: updatedMergedFiles.length,
       });
     } else {
-      // Create new file
-      const createdFile = await CreatedExcelFile.create({
+      const createPayload: any = {
         filename: `excel_${Date.now()}_${file.name}`,
         originalFilename: file.name,
         fileData: buffer,
@@ -557,17 +623,23 @@ async function handleSaveExcel(req: AuthenticatedRequest) {
         createdBy: userId,
         createdByName: userName,
         createdByEmail: userEmail,
-      });
+      };
+      if (isPickSave && pickFormatId && pickRowIndices.length > 0) {
+        createPayload.formatId = new mongoose.Types.ObjectId(pickFormatId);
+        createPayload.pickedTemplateRowIndices = pickRowIndices;
+      }
+      const createdFile = await CreatedExcelFile.create(createPayload);
+      const doc = Array.isArray(createdFile) ? createdFile[0] : createdFile;
 
       return NextResponse.json({
         success: true,
         message: 'Excel file saved successfully',
         data: {
-          id: createdFile._id,
-          filename: createdFile.originalFilename,
-          labourType: createdFile.labourType,
-          rowCount: createdFile.rowCount,
-          createdAt: createdFile.createdAt,
+          id: doc._id,
+          filename: doc.originalFilename,
+          labourType: doc.labourType,
+          rowCount: doc.rowCount,
+          createdAt: doc.createdAt,
         },
       });
     }

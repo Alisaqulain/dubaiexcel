@@ -28,11 +28,20 @@ async function handleGetPickedRows(req: AuthenticatedRequest) {
     const formatIdObj = new mongoose.Types.ObjectId(formatId);
     const picks = await PickedTemplateRow.find({ formatId: formatIdObj }).lean();
 
-    const userIdStr = String(userId);
+    let userObjId: mongoose.Types.ObjectId;
+    try {
+      userObjId = new mongoose.Types.ObjectId(userId as string);
+    } catch {
+      userObjId = new mongoose.Types.ObjectId();
+    }
     const pickedRows: Record<string, { empId: string; empName: string }> = {};
     const myPickedRows: number[] = [];
     picks.forEach((p: any) => {
-      if (p.pickedBy && p.pickedBy.toString() === userIdStr) {
+      const pickedByObj = p.pickedBy;
+      const pickedByIdStr = pickedByObj != null ? String(pickedByObj) : '';
+      const userIdStr = String(userId);
+      const isMine = pickedByIdStr && (pickedByIdStr === userIdStr || (userObjId && userObjId.toString() === pickedByIdStr));
+      if (isMine) {
         myPickedRows.push(p.rowIndex);
       } else {
         pickedRows[String(p.rowIndex)] = {

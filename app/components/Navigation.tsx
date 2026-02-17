@@ -64,6 +64,14 @@ export default function Navigation() {
                 Format View
               </Link>
             )}
+            {(user.role === 'super-admin' || user.role === 'admin') && (
+              <Link
+                href="/admin/emp-pick"
+                className={`flex items-center px-3 py-2 rounded-md text-sm font-medium ${isActive('/admin/emp-pick') ? 'bg-blue-800' : 'hover:bg-blue-700'}`}
+              >
+                Emp pick
+              </Link>
+            )}
             {/* Super Admin & Admin Navigation */}
             {(user.role === 'super-admin' || user.role === 'admin') && (
               <>

@@ -62,6 +62,8 @@ interface CreatedExcelFile {
   lastEditedAt?: string; // Date when file was last edited
   lastEditedBy?: string; // User who last edited
   lastEditedByName?: string; // Name of user who last edited
+  formatId?: string; // Set when file was created from employee "Save my pick"
+  pickedTemplateRowIndices?: number[];
   createdAt: string;
   updatedAt?: string;
 }
@@ -1048,8 +1050,13 @@ function CreatedExcelFilesComponent() {
                       />
                     </td>
                     <td className="px-6 py-4 text-sm text-gray-900">
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-2 flex-wrap">
                         <span>{highlightAllSearchMatches(file.originalFilename, filesListSearch)}</span>
+                        {file.formatId && Array.isArray(file.pickedTemplateRowIndices) && file.pickedTemplateRowIndices.length > 0 ? (
+                          <span className="text-[10px] font-medium px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 border border-emerald-200 whitespace-nowrap">Employee data</span>
+                        ) : (
+                          <span className="text-[10px] font-medium px-2 py-0.5 rounded bg-amber-100 text-amber-800 border border-amber-200 whitespace-nowrap">Admin data</span>
+                        )}
                         {(file.mergeCount ?? 0) > 0 && (
                           <span 
                             className="flex items-center gap-0.5" 
