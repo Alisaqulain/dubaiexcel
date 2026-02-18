@@ -63,7 +63,7 @@
    - Open **“Login column & site logins”**:  
      - Choose the **login column** (e.g. PROJECT NAME).  
      - Click **“Load unique values”** to fill sites from the file.  
-     - Add/remove sites, set passwords (default `Password@1234`).  
+     - Add/remove sites, set passwords (default `Password@1234`).   
      - Click **“Save site logins”**.  
    - Now that file’s sites appear in the **Project / Site** login dropdown.
 

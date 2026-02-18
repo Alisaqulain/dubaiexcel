@@ -77,24 +77,3 @@ export async function GET(req: NextRequest) {
   });
   return handler(req);
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

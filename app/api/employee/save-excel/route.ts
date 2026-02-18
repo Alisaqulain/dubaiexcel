@@ -441,20 +441,67 @@ async function handleSaveExcel(req: AuthenticatedRequest) {
       // When updating a pick file, allow updating formatId and pickedTemplateRowIndices (e.g. after "Add data from file")
       const updateFormatId = formData.get('formatId') as string;
       const updateRowIndicesRaw = formData.get('rowIndices') as string;
+      const oldPickedIndices = Array.isArray(existingFile.pickedTemplateRowIndices)
+        ? [...existingFile.pickedTemplateRowIndices]
+        : [];
+      let newPickedIndices: number[] = oldPickedIndices;
       if (updateFormatId) {
         existingFile.formatId = new mongoose.Types.ObjectId(updateFormatId);
       }
       if (updateRowIndicesRaw) {
         try {
           const parsed = JSON.parse(updateRowIndicesRaw);
-          existingFile.pickedTemplateRowIndices = Array.isArray(parsed)
+          newPickedIndices = Array.isArray(parsed)
             ? parsed.filter((i: number) => typeof i === 'number' && i >= 0)
-            : existingFile.pickedTemplateRowIndices;
+            : oldPickedIndices;
+          existingFile.pickedTemplateRowIndices = newPickedIndices;
         } catch {
           // keep existing
         }
       }
       await existingFile.save();
+
+      // Sync PickedTemplateRow so admin sees who picked each row (claim new rows, release removed rows)
+      if (updateFormatId && newPickedIndices.length >= 0) {
+        const formatIdObj = new mongoose.Types.ObjectId(updateFormatId);
+        const existingPicks = await PickedTemplateRow.find({
+          formatId: formatIdObj,
+          rowIndex: { $in: newPickedIndices },
+        }).lean();
+        const takenByOther = existingPicks.filter((p: any) => p.pickedBy.toString() !== userId);
+        if (takenByOther.length > 0) {
+          const rows = Array.from(new Set(takenByOther.map((p: any) => p.rowIndex + 1))).sort((a, b) => a - b);
+          const first = takenByOther[0];
+          const msg = (first as any).empName
+            ? `Row(s) ${rows.join(', ')} are already picked by ${(first as any).empName}. Save was applied to your file, but those rows could not be claimed.`
+            : `Row(s) ${rows.join(', ')} are already picked by another employee.`;
+          console.warn('Save Excel PUT: ' + msg);
+        }
+        const empId = userEmail ?? '';
+        const empName = userName ?? 'Unknown';
+        const toRelease = oldPickedIndices.filter((i: number) => !newPickedIndices.includes(i));
+        const ops: any[] = [
+          ...newPickedIndices.map((rowIndex: number) => ({
+            updateOne: {
+              filter: { formatId: formatIdObj, rowIndex },
+              update: { $set: { pickedBy: userIdObj, empId, empName } },
+              upsert: true,
+            },
+          })),
+          ...(toRelease.length > 0 ? [{
+            deleteMany: {
+              filter: {
+                formatId: formatIdObj,
+                rowIndex: { $in: toRelease },
+                pickedBy: userIdObj,
+              },
+            },
+          }] : []),
+        ];
+        if (ops.length > 0) {
+          await PickedTemplateRow.bulkWrite(ops);
+        }
+      }
 
       // Find all merged files that include this file in their mergedFrom array
       const mergedFiles = await CreatedExcelFile.find({

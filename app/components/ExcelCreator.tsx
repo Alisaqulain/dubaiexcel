@@ -1560,7 +1560,52 @@ export default function ExcelCreator({ labourType, onFileCreated, onSaveAndClose
                   setEditingPickedIndices(sorted);
                   setShowAddFromFileModal(false);
                   const releasedText = indicesToRelease.length > 0 ? ` ${indicesToRelease.length} row(s) freed in main Excel.` : '';
-                  setMessage({ type: 'success', text: `Updated to ${sorted.length} row(s) from main file.${releasedText} Click Save Excel to update your file.` });
+                  setMessage({ type: 'success', text: `Updated to ${sorted.length} row(s). Saving file...` });
+
+                  if (currentEditingFileId && token) {
+                    try {
+                      setSaving(true);
+                      const workbook = XLSX.utils.book_new();
+                      const worksheet = XLSX.utils.json_to_sheet(newRows);
+                      const colWidths = columnNames.map(() => ({ wch: 20 }));
+                      worksheet['!cols'] = colWidths;
+                      XLSX.utils.book_append_sheet(workbook, worksheet, 'Data');
+                      const excelBuffer = XLSX.write(workbook, { type: 'array', bookType: 'xlsx' });
+                      const blob = new Blob([excelBuffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+                      const now = new Date();
+                      const dateStr = now.toISOString().split('T')[0];
+                      const timeStr = now.toTimeString().split(' ')[0].replace(/:/g, '-');
+                      const filename = `employee_data_${labourType.toLowerCase()}_${dateStr}_${timeStr}.xlsx`;
+                      const file = new File([blob], filename, { type: blob.type });
+                      const formData = new FormData();
+                      formData.append('file', file);
+                      formData.append('labourType', labourType);
+                      formData.append('rowCount', String(newRows.length));
+                      formData.append('fileId', currentEditingFileId);
+                      if (formatId) {
+                        formData.append('formatId', formatId);
+                        if (sorted.length > 0) formData.append('rowIndices', JSON.stringify(sorted));
+                      }
+                      const res = await fetch('/api/employee/save-excel', {
+                        method: 'PUT',
+                        headers: { Authorization: `Bearer ${token}` },
+                        body: formData,
+                      });
+                      const result = await res.json();
+                      if (result.success) {
+                        setMessage({ type: 'success', text: `File saved with ${sorted.length} row(s).${releasedText}` });
+                        if (onSaveSuccess) onSaveSuccess();
+                      } else {
+                        setMessage({ type: 'error', text: result.error || 'File could not be saved. You can try Save Excel.' });
+                      }
+                    } catch (err: any) {
+                      setMessage({ type: 'error', text: err.message || 'Save failed. Click Save Excel to try again.' });
+                    } finally {
+                      setSaving(false);
+                    }
+                  } else {
+                    setMessage({ type: 'success', text: `Updated to ${sorted.length} row(s) from main file.${releasedText} Click Save Excel to update your file.` });
+                  }
                 }}
                 className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
               >

@@ -14,9 +14,9 @@ export interface IPickedTemplateRow extends Document {
 }
 
 const PickedTemplateRowSchema = new Schema<IPickedTemplateRow>({
-  formatId: { type: Schema.Types.ObjectId, ref: 'ExcelFormat', required: true, index: true },
+  formatId: { type: Schema.Types.ObjectId, ref: 'ExcelFormat', required: true },
   rowIndex: { type: Number, required: true },
-  pickedBy: { type: Schema.Types.ObjectId, required: true, index: true },
+  pickedBy: { type: Schema.Types.ObjectId, required: true },
   empId: { type: String, required: true },
   empName: { type: String, required: true },
   createdAt: { type: Date, default: Date.now },

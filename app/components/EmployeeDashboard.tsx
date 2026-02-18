@@ -63,6 +63,7 @@ export default function EmployeeDashboard() {
   const [fileData, setFileData] = useState<any[]>([]);
   const [filesListSearch, setFilesListSearch] = useState('');
   const [viewDataSearch, setViewDataSearch] = useState('');
+  const [activeTab, setActiveTab] = useState<'formats' | 'mydata'>('formats');
   const debouncedFilesListSearch = useDebounce(filesListSearch, SEARCH_DEBOUNCE_MS);
   const debouncedViewDataSearch = useDebounce(viewDataSearch, SEARCH_DEBOUNCE_MS);
 
@@ -241,7 +242,36 @@ export default function EmployeeDashboard() {
         
         <div className="bg-white rounded-lg shadow p-6 mb-6">
           <h2 className="text-xl font-semibold mb-4">Welcome, {user?.name || (user as any)?.empId || 'Employee'}</h2>
-          <p className="text-gray-600">Create and save your Excel files here. All saved files will be visible to administrators.</p>
+          <p className="text-gray-600 mb-4">Create and save your Excel files here. All saved files will be visible to administrators.</p>
+          <div className="flex gap-1 border-b border-gray-200">
+            <button
+              type="button"
+              onClick={() => setActiveTab('formats')}
+              className={`px-4 py-2 text-sm font-medium rounded-t-md border border-b-0 transition-colors ${
+                activeTab === 'formats'
+                  ? 'bg-white border-gray-300 text-blue-700 -mb-px'
+                  : 'bg-gray-50 text-gray-600 border-transparent hover:bg-gray-100'
+              }`}
+            >
+              📋 Formats
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('mydata')}
+              className={`px-4 py-2 text-sm font-medium rounded-t-md border border-b-0 transition-colors ${
+                activeTab === 'mydata'
+                  ? 'bg-white border-gray-300 text-emerald-700 -mb-px'
+                  : 'bg-gray-50 text-gray-600 border-transparent hover:bg-gray-100'
+              }`}
+            >
+              📂 My data
+              {pickSavedFiles.length > 0 && (
+                <span className="ml-1.5 px-1.5 py-0.5 text-xs rounded-full bg-emerald-100 text-emerald-800">
+                  {pickSavedFiles.length}
+                </span>
+              )}
+            </button>
+          </div>
         </div>
 
         {message && (
@@ -252,6 +282,8 @@ export default function EmployeeDashboard() {
           </div>
         )}
 
+        {activeTab === 'formats' && (
+        <>
         {/* Assigned Formats Section */}
         <div className="bg-white rounded-lg shadow p-6 mb-6">
           <h2 className="text-xl font-semibold mb-4">My Assigned Excel Formats</h2>
@@ -385,98 +417,14 @@ export default function EmployeeDashboard() {
                 </div>
                 ))}
               </div>
-              {/* My saved picks - appear here with Work with this */}
               {pickSavedFiles.length > 0 && (
-                <div>
-                  <h3 className="text-sm font-semibold text-gray-700 mb-3">My data (saved picks)</h3>
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                    {pickSavedFiles.map((file) => (
-                      <div
-                        key={file._id}
-                        className="border-2 border-emerald-200 rounded-lg p-5 bg-emerald-50/50 hover:shadow-lg transition-all"
-                      >
-                        <div className="mb-3">
-                          <h3 className="text-lg font-semibold text-gray-900 mb-2 flex items-center gap-2 flex-wrap">
-                            {file.originalFilename}
-                            <span className="text-[10px] font-normal px-2 py-0.5 rounded bg-emerald-100 text-emerald-800 border border-emerald-200">My data</span>
-                          </h3>
-                          <div className="flex items-center gap-2 text-xs text-gray-500 mb-4">
-                            <span className="bg-gray-100 px-2 py-1 rounded">{file.rowCount} rows</span>
-                            <span className="text-gray-400">{new Date(file.createdAt).toLocaleDateString()}</span>
-                          </div>
-                        </div>
-                        <div className="space-y-2">
-                          <button
-                            onClick={() => handleWorkWithPickFile(file)}
-                            className="w-full px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 text-sm font-medium flex items-center justify-center gap-2"
-                          >
-                            ✏️ Work with this
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
+                <p className="text-sm text-gray-500 mt-4">
+                  Your saved picks from the main Excel are in the <button type="button" onClick={() => setActiveTab('mydata')} className="text-emerald-600 hover:underline font-medium">My data tab</button> ({pickSavedFiles.length} file{pickSavedFiles.length !== 1 ? 's' : ''}).
+                </p>
               )}
             </div>
           )}
         </div>
-
-        {/* Excel Creator Section - Show when format is selected */}
-        {showExcelCreator && selectedFormat && (
-          <div className="bg-white rounded-lg shadow p-6 mb-6">
-            <div className="flex justify-between items-center mb-4">
-              <div>
-                <h2 className="text-xl font-semibold">Create Excel File</h2>
-                <p className="text-sm text-gray-600 mt-1">
-                  Working with format: <strong>{selectedFormat.name}</strong>
-                </p>
-              </div>
-              <button
-                onClick={() => {
-                  setShowExcelCreator(false);
-                  setSelectedFormat(null);
-                  setEditingFileId(null);
-                  setEditingFileName(null);
-                  setEditingFilePickedIndices(undefined);
-                  setFileData([]);
-                  setViewingFileId(null);
-                }}
-                className="px-4 py-2 text-gray-600 hover:text-gray-800 border border-gray-300 rounded-md"
-              >
-                Close
-              </button>
-            </div>
-            <ExcelCreator 
-              key={`${selectedFormat._id}-${editingFileId || 'new'}`} // Force remount when format or file changes
-              labourType="OUR_LABOUR"
-              useCustomFormat={true}
-              formatId={selectedFormat._id}
-              editingFileId={editingFileId || undefined}
-              initialData={fileData.length > 0 ? fileData : undefined}
-              onFileCreated={(file) => {
-                setCreatedFile(file);
-              }}
-              onSaveSuccess={() => {
-                // Refresh the saved files list after saving
-                fetchMyCreatedFiles();
-              }}
-              onSaveAndClose={() => {
-                setShowExcelCreator(false);
-                setSelectedFormat(null);
-                setEditingFileId(null);
-                setEditingFileName(null);
-                setEditingFilePickedIndices(undefined);
-                setFileData([]);
-                setViewingFileId(null);
-                fetchMyCreatedFiles();
-                setMessage({ type: 'success', text: 'File saved successfully!' });
-              }}
-              editingFileName={editingFileName || undefined}
-              initialPickedTemplateRowIndices={editingFilePickedIndices}
-            />
-          </div>
-        )}
 
         {/* My Created Files Section */}
         <div className="bg-white rounded-lg shadow p-6 mb-6">
@@ -555,6 +503,106 @@ export default function EmployeeDashboard() {
             </>
           )}
         </div>
+
+        </>
+        )}
+
+        {/* My data tab - saved picks only */}
+        {activeTab === 'mydata' && (
+        <div className="bg-white rounded-lg shadow p-6 mb-6">
+          <h2 className="text-xl font-semibold mb-2">My data (saved picks)</h2>
+          <p className="text-gray-600 mb-6">Files you created by picking rows from the main Excel. Click &quot;Work with this&quot; to add or remove rows, then save.</p>
+          {loadingCreatedFiles ? (
+            <div className="text-center py-12 text-gray-500">Loading...</div>
+          ) : pickSavedFiles.length === 0 ? (
+            <div className="text-center py-12 text-gray-500 rounded-lg border-2 border-dashed border-gray-200 bg-gray-50">
+              <p className="mb-2">No saved pick files yet.</p>
+              <p className="text-sm">Go to the <button type="button" onClick={() => setActiveTab('formats')} className="text-blue-600 hover:underline font-medium">Formats</button> tab, work with a format, pick rows, and use &quot;Save my pick&quot; — your files will appear here.</p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+              {pickSavedFiles.map((file) => (
+                <div
+                  key={file._id}
+                  className="border-2 border-emerald-200 rounded-xl p-6 bg-emerald-50/60 hover:shadow-lg hover:border-emerald-300 transition-all"
+                >
+                  <div className="mb-4">
+                    <h3 className="text-base font-semibold text-gray-900 mb-2 flex items-center gap-2 flex-wrap break-words">
+                      {file.originalFilename}
+                      <span className="text-[10px] font-normal px-2 py-0.5 rounded bg-emerald-200 text-emerald-900 border border-emerald-300 shrink-0">My data</span>
+                    </h3>
+                    <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
+                      <span className="bg-white/80 px-2 py-1 rounded border border-emerald-200">{file.rowCount} rows</span>
+                      <span className="text-gray-500">{new Date(file.createdAt).toLocaleDateString()}</span>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => handleWorkWithPickFile(file)}
+                    className="w-full px-4 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium flex items-center justify-center gap-2"
+                  >
+                    ✏️ Work with this
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        )}
+
+        {/* Excel Creator - shown on same tab when "Work with this" or format selected */}
+        {showExcelCreator && selectedFormat && (
+          <div className="bg-white rounded-lg shadow p-6 mb-6">
+            <div className="flex justify-between items-center mb-4">
+              <div>
+                <h2 className="text-xl font-semibold">Create Excel File</h2>
+                <p className="text-sm text-gray-600 mt-1">
+                  Working with format: <strong>{selectedFormat.name}</strong>
+                </p>
+              </div>
+              <button
+                onClick={() => {
+                  setShowExcelCreator(false);
+                  setSelectedFormat(null);
+                  setEditingFileId(null);
+                  setEditingFileName(null);
+                  setEditingFilePickedIndices(undefined);
+                  setFileData([]);
+                  setViewingFileId(null);
+                }}
+                className="px-4 py-2 text-gray-600 hover:text-gray-800 border border-gray-300 rounded-md"
+              >
+                Close
+              </button>
+            </div>
+            <ExcelCreator 
+              key={`${selectedFormat._id}-${editingFileId || 'new'}`}
+              labourType="OUR_LABOUR"
+              useCustomFormat={true}
+              formatId={selectedFormat._id}
+              editingFileId={editingFileId || undefined}
+              initialData={fileData.length > 0 ? fileData : undefined}
+              onFileCreated={(file) => {
+                setCreatedFile(file);
+              }}
+              onSaveSuccess={() => {
+                fetchMyCreatedFiles();
+              }}
+              onSaveAndClose={() => {
+                setShowExcelCreator(false);
+                setSelectedFormat(null);
+                setEditingFileId(null);
+                setEditingFileName(null);
+                setEditingFilePickedIndices(undefined);
+                setFileData([]);
+                setViewingFileId(null);
+                fetchMyCreatedFiles();
+                setMessage({ type: 'success', text: 'File saved successfully!' });
+              }}
+              editingFileName={editingFileName || undefined}
+              initialPickedTemplateRowIndices={editingFilePickedIndices}
+            />
+          </div>
+        )}
 
         {/* View File Modal - Excel-style view with search and yellow highlight */}
         {viewingFileId && fileData.length > 0 && (() => {
