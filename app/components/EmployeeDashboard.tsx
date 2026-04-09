@@ -26,6 +26,21 @@ interface CreatedFile {
   pickedTemplateRowIndices?: number[];
   createdAt: string;
   updatedAt?: string;
+  lastEditedAt?: string;
+}
+
+function todayLocalYmd(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+function fileLocalYmd(f: Pick<CreatedFile, 'lastEditedAt' | 'updatedAt' | 'createdAt'>): string {
+  const raw = f.lastEditedAt || f.updatedAt || f.createdAt;
+  if (!raw) return todayLocalYmd();
+  const d = new Date(raw);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
 interface ExcelFormat {
@@ -67,6 +82,13 @@ export default function EmployeeDashboard() {
   const debouncedFilesListSearch = useDebounce(filesListSearch, SEARCH_DEBOUNCE_MS);
   const debouncedViewDataSearch = useDebounce(viewDataSearch, SEARCH_DEBOUNCE_MS);
 
+  const [workspaceFormatId, setWorkspaceFormatId] = useState('');
+
+  useEffect(() => {
+    if (formats.length === 0) return;
+    setWorkspaceFormatId((id) => id || formats[0]._id);
+  }, [formats]);
+
   useEffect(() => {
     fetchMyFormats();
     fetchMyCreatedFiles();
@@ -94,11 +116,11 @@ export default function EmployeeDashboard() {
   const fetchMyCreatedFiles = async () => {
     try {
       setLoadingCreatedFiles(true);
-      const token = localStorage.getItem('token');
+      const authToken = token ?? (typeof window !== 'undefined' ? localStorage.getItem('token') : null);
       const response = await fetch('/api/employee/created-excel-files', {
         cache: 'no-store',
         headers: {
-          'Authorization': `Bearer ${token}`,
+          Authorization: `Bearer ${authToken ?? ''}`,
         },
       });
       const result = await response.json();
@@ -142,6 +164,74 @@ export default function EmployeeDashboard() {
     myCreatedFiles.filter((f) => !(f.formatId && Array.isArray(f.pickedTemplateRowIndices) && f.pickedTemplateRowIndices.length > 0)),
     [myCreatedFiles]
   );
+
+  /** Non-pick files for this format: daily saves from My data (appear in Saved files). */
+  const myDataSavedFiles = useMemo(() => {
+    return myCreatedFiles.filter(
+      (f) =>
+        f.formatId &&
+        !(Array.isArray(f.pickedTemplateRowIndices) && f.pickedTemplateRowIndices.length > 0)
+    );
+  }, [myCreatedFiles]);
+
+  const myDataDailySave = useMemo(() => {
+    if (activeTab !== 'mydata' || !showExcelCreator || !selectedFormat) return null;
+    const fmtId = selectedFormat._id;
+    const ymd = todayLocalYmd();
+    const slug =
+      selectedFormat.name
+        .replace(/[^a-z0-9]+/gi, '_')
+        .replace(/^_+|_+$/g, '')
+        .slice(0, 48) || 'format';
+    const defaultFilename = `${slug}_${ymd}.xlsx`;
+
+    const nonPickSameFormat = myCreatedFiles.filter(
+      (f) =>
+        f.formatId === fmtId &&
+        !(Array.isArray(f.pickedTemplateRowIndices) && f.pickedTemplateRowIndices.length > 0)
+    );
+
+    const newestForDay = (list: CreatedFile[]) => {
+      const onDay = list.filter((f) => fileLocalYmd(f) === ymd);
+      onDay.sort(
+        (a, b) =>
+          new Date(b.updatedAt || b.lastEditedAt || b.createdAt).getTime() -
+          new Date(a.updatedAt || a.lastEditedAt || a.createdAt).getTime()
+      );
+      return onDay[0]?._id ?? null;
+    };
+
+    const pickOpen = !!(
+      editingFileId &&
+      Array.isArray(editingFilePickedIndices) &&
+      editingFilePickedIndices.length > 0
+    );
+
+    let putTargetId: string | null = null;
+    if (pickOpen) {
+      putTargetId = newestForDay(nonPickSameFormat);
+    } else if (editingFileId) {
+      const cur = myCreatedFiles.find((f) => f._id === editingFileId);
+      const isPick =
+        !!cur &&
+        Array.isArray(cur.pickedTemplateRowIndices) &&
+        cur.pickedTemplateRowIndices.length > 0;
+      if (cur && !isPick) {
+        putTargetId = fileLocalYmd(cur) === ymd ? editingFileId : null;
+      } else if (cur && isPick) {
+        putTargetId = newestForDay(nonPickSameFormat);
+      }
+    }
+
+    return { putTargetId, defaultFilename };
+  }, [
+    activeTab,
+    showExcelCreator,
+    selectedFormat,
+    editingFileId,
+    editingFilePickedIndices,
+    myCreatedFiles,
+  ]);
 
   const handleWorkWithPickFile = async (file: CreatedFile) => {
     try {
@@ -290,7 +380,11 @@ export default function EmployeeDashboard() {
           <div className="mb-4 p-4 bg-blue-50 rounded-lg border border-blue-200">
             <h3 className="font-semibold text-blue-900 mb-2">📋 Your Assigned Formats</h3>
             <p className="text-sm text-blue-700 mb-2">
-              You can only use the formats assigned to you. Click on a format to work with it.
+              You can only use formats assigned to you. Download templates here. To <strong>pick rows and save</strong>, use the{' '}
+              <button type="button" onClick={() => setActiveTab('mydata')} className="text-blue-900 font-semibold underline">
+                My data
+              </button>{' '}
+              tab.
             </p>
             <p className="text-xs text-blue-600">
               All Excel files must match your assigned format exactly. Files that don&apos;t match will be rejected.
@@ -333,18 +427,10 @@ export default function EmployeeDashboard() {
                   </div>
                   
                   <div className="space-y-2">
-                    <button
-                      onClick={() => {
-                        setSelectedFormat(format);
-                        setEditingFileId(null); // Clear editing state
-                        setFileData([]); // Clear file data
-                        setShowExcelCreator(true);
-                        setMessage(null);
-                      }}
-                      className="w-full px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 text-sm font-medium flex items-center justify-center gap-2"
-                    >
-                      ✏️ Work with this Format
-                    </button>
+                    {/* Primary "create from format" path disabled — use My data → open workspace to pick rows */}
+                    <div className="w-full px-4 py-3 rounded-md text-sm bg-gray-100 text-gray-700 border border-gray-200 text-center">
+                      Pick &amp; save is opened from <button type="button" onClick={() => setActiveTab('mydata')} className="text-emerald-700 font-semibold underline">My data</button>.
+                    </div>
                     <button
                       onClick={() => handleDownloadTemplate(format._id, format.name)}
                       className="w-full px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 text-sm font-medium flex items-center justify-center gap-2"
@@ -432,7 +518,9 @@ export default function EmployeeDashboard() {
           {loadingCreatedFiles ? (
             <div className="text-center py-8">Loading...</div>
           ) : savedFilesOnly.length === 0 ? (
-            <div className="text-center py-8 text-gray-500">No saved files yet. Create your first Excel file from a format above, or use &quot;Save my pick&quot; — those appear under My Assigned Excel Formats.</div>
+            <div className="text-center py-8 text-gray-500">
+              No saved files yet that are not &quot;picks&quot;. Pick saves use <strong>My data</strong>; other uploads may appear here when your workflow uses them.
+            </div>
           ) : (
             <>
               <div className="mb-4 flex flex-wrap items-center gap-3">
@@ -509,15 +597,61 @@ export default function EmployeeDashboard() {
 
         {/* My data tab - saved picks only */}
         {activeTab === 'mydata' && (
+        <>
         <div className="bg-white rounded-lg shadow p-6 mb-6">
-          <h2 className="text-xl font-semibold mb-2">My data (saved picks)</h2>
-          <p className="text-gray-600 mb-6">Files you created by picking rows from the main Excel. Click &quot;Work with this&quot; to add or remove rows, then save.</p>
+          <h2 className="text-xl font-semibold mb-2">My picks</h2>
+          <p className="text-gray-600 mb-6">
+            Files from <strong>Save my pick</strong>. Open <strong>Work with this</strong>, edit cells, then <strong>Save Excel</strong> — a popup uses today&apos;s date in the name. The same day always updates one file; a new day creates a new file. Those day files appear below under Saved files.
+          </p>
           {loadingCreatedFiles ? (
             <div className="text-center py-12 text-gray-500">Loading...</div>
           ) : pickSavedFiles.length === 0 ? (
-            <div className="text-center py-12 text-gray-500 rounded-lg border-2 border-dashed border-gray-200 bg-gray-50">
-              <p className="mb-2">No saved pick files yet.</p>
-              <p className="text-sm">Go to the <button type="button" onClick={() => setActiveTab('formats')} className="text-blue-600 hover:underline font-medium">Formats</button> tab, work with a format, pick rows, and use &quot;Save my pick&quot; — your files will appear here.</p>
+            <div className="text-center py-12 text-gray-500 rounded-lg border-2 border-dashed border-gray-200 bg-gray-50 px-4">
+              <p className="mb-4">No saved pick files yet.</p>
+              {formats.length > 0 ? (
+                <div className="max-w-md mx-auto text-left space-y-3">
+                  <p className="text-sm text-gray-600">
+                    Open the format workspace here, pick rows in the main grid, then use <strong>Save my pick</strong> (default filename includes date and time).
+                  </p>
+                  <div className="flex flex-col sm:flex-row gap-2 items-stretch sm:items-end">
+                    <div className="flex-1">
+                      <label className="block text-xs font-medium text-gray-600 mb-1">Format</label>
+                      <select
+                        value={workspaceFormatId}
+                        onChange={(e) => setWorkspaceFormatId(e.target.value)}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
+                      >
+                        {formats.map((f) => (
+                          <option key={f._id} value={f._id}>
+                            {f.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const f = formats.find((x) => x._id === workspaceFormatId) || formats[0];
+                        if (!f) return;
+                        setSelectedFormat(f);
+                        setEditingFileId(null);
+                        setEditingFileName(null);
+                        setEditingFilePickedIndices(undefined);
+                        setFileData([]);
+                        setViewingFileId(null);
+                        setShowExcelCreator(true);
+                        setMessage(null);
+                        setActiveTab('mydata');
+                      }}
+                      className="px-4 py-2 bg-blue-600 text-white rounded-md text-sm font-medium hover:bg-blue-700 whitespace-nowrap"
+                    >
+                      Open workspace — pick &amp; save
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <p className="text-sm">No formats assigned. Contact your administrator.</p>
+              )}
             </div>
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
@@ -547,9 +681,55 @@ export default function EmployeeDashboard() {
             </div>
           )}
         </div>
+
+        <div className="bg-white rounded-lg shadow p-6 mb-6">
+          <h2 className="text-xl font-semibold mb-2">Saved files (by day)</h2>
+          <p className="text-gray-600 text-sm mb-4">
+            Day-stamped saves from My picks (after you use Save Excel). Edit keeps updating today&apos;s file; tomorrow opens a new one automatically.
+          </p>
+          {loadingCreatedFiles ? (
+            <div className="text-center py-8 text-gray-500">Loading...</div>
+          ) : myDataSavedFiles.length === 0 ? (
+            <p className="text-center py-8 text-gray-500 border-2 border-dashed border-gray-200 rounded-lg bg-gray-50 text-sm">
+              No day-saved files yet. Work with a pick above, edit, then Save Excel.
+            </p>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+              {[...myDataSavedFiles]
+                .sort(
+                  (a, b) =>
+                    new Date(b.updatedAt || b.lastEditedAt || b.createdAt).getTime() -
+                    new Date(a.updatedAt || a.lastEditedAt || a.createdAt).getTime()
+                )
+                .map((file) => (
+                  <div
+                    key={file._id}
+                    className="border-2 border-slate-200 rounded-xl p-5 bg-slate-50/80 hover:shadow-md transition-all"
+                  >
+                    <h3 className="font-semibold text-gray-900 break-words mb-2">{file.originalFilename}</h3>
+                    <div className="text-xs text-gray-500 mb-3 space-y-1">
+                      <div>{file.rowCount} rows</div>
+                      <div>
+                        Last updated:{' '}
+                        {new Date(file.lastEditedAt || file.updatedAt || file.createdAt).toLocaleString()}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleEditFile(file._id, file)}
+                      className="w-full px-4 py-2 bg-slate-700 text-white rounded-lg hover:bg-slate-800 text-sm font-medium"
+                    >
+                      ✏️ Edit
+                    </button>
+                  </div>
+                ))}
+            </div>
+          )}
+        </div>
+        </>
         )}
 
-        {/* Excel Creator - shown on same tab when "Work with this" or format selected */}
+        {/* Excel Creator - shown when "Work with this" / Edit opens the workspace */}
         {showExcelCreator && selectedFormat && (
           <div className="bg-white rounded-lg shadow p-6 mb-6">
             <div className="flex justify-between items-center mb-4">
@@ -558,6 +738,12 @@ export default function EmployeeDashboard() {
                 <p className="text-sm text-gray-600 mt-1">
                   Working with format: <strong>{selectedFormat.name}</strong>
                 </p>
+                {!editingFileId && (
+                  <p className="text-xs text-amber-800 bg-amber-50 border border-amber-100 rounded px-2 py-1.5 mt-2 max-w-3xl">
+                    This screen is the <strong>live admin template</strong> (pick / new saves). To change a file you already saved, open it from the{' '}
+                    <strong>My data</strong> tab and save there — those edits stay in your saved file.
+                  </p>
+                )}
               </div>
               <button
                 onClick={() => {
@@ -581,13 +767,28 @@ export default function EmployeeDashboard() {
               formatId={selectedFormat._id}
               editingFileId={editingFileId || undefined}
               initialData={fileData.length > 0 ? fileData : undefined}
+              myDataDailySave={myDataDailySave}
+              onMyDataDailyFileSaved={(id, filename) => {
+                setEditingFileId(id);
+                setEditingFileName(filename);
+                setEditingFilePickedIndices(undefined);
+              }}
               onFileCreated={(file) => {
                 setCreatedFile(file);
               }}
-              onSaveSuccess={() => {
-                fetchMyCreatedFiles();
+              onSaveSuccess={async () => {
+                await fetchMyCreatedFiles();
+                setMessage({
+                  type: 'success',
+                  text:
+                    'List updated. Check Formats → My Saved Excel Files for normal saves, or My data for “Save my pick” files.',
+                });
               }}
               onSaveAndClose={() => {
+                const fileIsPickWorkflow =
+                  !!(editingFileId &&
+                    Array.isArray(editingFilePickedIndices) &&
+                    editingFilePickedIndices.length > 0);
                 setShowExcelCreator(false);
                 setSelectedFormat(null);
                 setEditingFileId(null);
@@ -595,8 +796,14 @@ export default function EmployeeDashboard() {
                 setEditingFilePickedIndices(undefined);
                 setFileData([]);
                 setViewingFileId(null);
-                fetchMyCreatedFiles();
-                setMessage({ type: 'success', text: 'File saved successfully!' });
+                setActiveTab(fileIsPickWorkflow ? 'mydata' : 'formats');
+                void fetchMyCreatedFiles();
+                setMessage({
+                  type: 'success',
+                  text: fileIsPickWorkflow
+                    ? 'Workspace closed. Your pick file is under the My data tab.'
+                    : 'Workspace closed. Your file is under Formats → My Saved Excel Files (newest first).',
+                });
               }}
               editingFileName={editingFileName || undefined}
               initialPickedTemplateRowIndices={editingFilePickedIndices}

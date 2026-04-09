@@ -1,9 +1,10 @@
 'use client';
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useDebounce, SEARCH_DEBOUNCE_MS } from '@/lib/useDebounce';
 import * as XLSX from 'xlsx';
+import { TEMPLATE_ROW_INDEX } from '@/lib/formatTemplateRows';
 
 function getColumnLetter(index: number): string {
   let s = '';
@@ -66,6 +67,20 @@ interface ExcelRow {
   [key: string]: string | number;
 }
 
+function stripTemplateRowMeta(row: ExcelRow): ExcelRow {
+  const o = { ...row } as Record<string, unknown>;
+  delete o[TEMPLATE_ROW_INDEX];
+  delete o.__deleted;
+  return o as ExcelRow;
+}
+
+/** Stable template row index for picks/API; null for manually added rows (cannot pick). */
+function getPickTemplateRowIndex(row: ExcelRow | Record<string, unknown>): number | null {
+  const v = (row as Record<string, unknown>)[TEMPLATE_ROW_INDEX];
+  if (typeof v === 'number' && v >= 0 && Number.isInteger(v)) return v;
+  return null;
+}
+
 interface Column {
   name: string;
   type: 'text' | 'number' | 'date' | 'email' | 'dropdown';
@@ -86,21 +101,45 @@ interface ExcelFormat {
   columns: Column[];
 }
 
+export interface MyDataDailySaveConfig {
+  /** PUT this id when saving today’s file; null = POST new file for today */
+  putTargetId: string | null;
+  defaultFilename: string;
+}
+
 interface ExcelCreatorProps {
   labourType: 'OUR_LABOUR' | 'SUPPLY_LABOUR' | 'SUBCONTRACTOR';
   onFileCreated?: (file: File) => void;
   onSaveAndClose?: () => void; // Callback when Save and Close is clicked
-  onSaveSuccess?: () => void; // Callback when save is successful (to refresh saved files list)
+  onSaveSuccess?: () => void | Promise<void>; // Callback when save is successful (to refresh saved files list)
   useCustomFormat?: boolean; // If true, use assigned format instead of default
   formatId?: string; // Specific format ID to use (if provided, will fetch that format)
   initialData?: ExcelRow[]; // Initial data for editing existing file
   editingFileId?: string; // ID of file being edited
   editingFileName?: string; // Display name when editing a saved file (shows "Edit mode")
   initialPickedTemplateRowIndices?: number[]; // When editing a pick file, which template row indices are in the file (for "Add data from file")
+  /** My data tab: one file per calendar day; open save popup with date-based name */
+  myDataDailySave?: MyDataDailySaveConfig | null;
+  onMyDataDailyFileSaved?: (fileId: string, filename: string) => void;
 }
 
-export default function ExcelCreator({ labourType, onFileCreated, onSaveAndClose, onSaveSuccess, useCustomFormat = false, formatId, initialData, editingFileId, editingFileName, initialPickedTemplateRowIndices }: ExcelCreatorProps) {
+export default function ExcelCreator({
+  labourType,
+  onFileCreated,
+  onSaveAndClose,
+  onSaveSuccess,
+  useCustomFormat = false,
+  formatId,
+  initialData,
+  editingFileId,
+  editingFileName,
+  initialPickedTemplateRowIndices,
+  myDataDailySave,
+  onMyDataDailyFileSaved,
+}: ExcelCreatorProps) {
   const { token } = useAuth();
+  const initialDataRef = useRef(initialData);
+  initialDataRef.current = initialData;
   const [rows, setRows] = useState<ExcelRow[]>(initialData || []);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [showBulkOptions, setShowBulkOptions] = useState(false);
@@ -118,6 +157,9 @@ export default function ExcelCreator({ labourType, onFileCreated, onSaveAndClose
   const [pickedRowIndices, setPickedRowIndices] = useState<Set<number>>(new Set());
   const [showSavePickModal, setShowSavePickModal] = useState(false);
   const [savePickFilename, setSavePickFilename] = useState('');
+  const [showMyDataSaveModal, setShowMyDataSaveModal] = useState(false);
+  const [myDataSaveFilename, setMyDataSaveFilename] = useState('');
+  const [myDataPendingAction, setMyDataPendingAction] = useState<'save' | 'saveClose' | null>(null);
   const [savingPick, setSavingPick] = useState(false);
   const [pickedByOthers, setPickedByOthers] = useState<Record<number, { empId: string; empName: string }>>({});
   // When editing a pick file: template index per row (null = manual row). Used for "Add data from file" and for saving rowIndices.
@@ -140,8 +182,18 @@ export default function ExcelCreator({ labourType, onFileCreated, onSaveAndClose
   useEffect(() => {
     // Only update if initialData actually changed (not just on every render)
     if (initialData && initialData.length > 0) {
-      // If we have initial data (editing a file), use it
-      setRows(initialData);
+      // If we have initial data (editing a file), use it; attach stable template index when we know it (pick files).
+      const withIdx =
+        Array.isArray(initialPickedTemplateRowIndices) && initialPickedTemplateRowIndices.length > 0
+          ? initialData.map((row, i) => {
+              const t = initialPickedTemplateRowIndices[i];
+              if (typeof t === 'number' && t >= 0) {
+                return { ...row, [TEMPLATE_ROW_INDEX]: t } as ExcelRow;
+              }
+              return row;
+            })
+          : initialData;
+      setRows(withIdx);
       setCurrentEditingFileId(editingFileId);
       setMessage(null); // Clear any previous messages
       // Sync editingPickedIndices: same length as rows; use initialPickedTemplateRowIndices where available, else null
@@ -222,7 +274,12 @@ export default function ExcelCreator({ labourType, onFileCreated, onSaveAndClose
             const totalCount = result.data.templateRowCount ?? loadedRows.length;
             if (loadedRows.length > 0) {
               setTemplateRows(loadedRows);
-              if (!initialData || initialData.length === 0) {
+              const keepSavedRows = !!(
+                initialDataRef.current &&
+                Array.isArray(initialDataRef.current) &&
+                initialDataRef.current.length > 0
+              );
+              if (!keepSavedRows) {
                 setRows(loadedRows);
               }
             } else {
@@ -623,7 +680,7 @@ export default function ExcelCreator({ labourType, onFileCreated, onSaveAndClose
       const workbook = XLSX.utils.book_new();
       
       // Convert rows to worksheet
-      const worksheet = XLSX.utils.json_to_sheet(rows);
+      const worksheet = XLSX.utils.json_to_sheet(rows.map(stripTemplateRowMeta));
       
       // Set column widths
       const colWidths = columnNames.map(() => ({ wch: 20 }));
@@ -673,25 +730,99 @@ export default function ExcelCreator({ labourType, onFileCreated, onSaveAndClose
     }
   };
 
-  const togglePick = (rowIndex: number) => {
-    if (pickedByOthers[rowIndex]) return;
-    const wasChecked = pickedRowIndices.has(rowIndex);
+  const togglePick = (uiRowIndex: number) => {
+    const t = getPickTemplateRowIndex(rows[uiRowIndex] || {});
+    if (t === null || pickedByOthers[t]) return;
+    const wasChecked = pickedRowIndices.has(t);
     setPickedRowIndices((prev) => {
       const next = new Set(prev);
-      if (next.has(rowIndex)) next.delete(rowIndex);
-      else next.add(rowIndex);
+      if (next.has(t)) next.delete(t);
+      else next.add(t);
       return next;
     });
     if (wasChecked && useCustomFormat && formatId && token) {
       fetch('/api/employee/picked-rows', {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ formatId, rowIndex }),
+        body: JSON.stringify({ formatId, rowIndex: t }),
       }).catch(() => {});
     }
   };
-  const selectAllPick = () => setPickedRowIndices(new Set(rows.map((_, i) => i).filter((i) => !pickedByOthers[i])));
+  const selectAllPick = () =>
+    setPickedRowIndices(
+      new Set(
+        rows.flatMap((row, i) => {
+          const t = getPickTemplateRowIndex(row);
+          return t !== null && !pickedByOthers[t] ? [t] : [];
+        })
+      )
+    );
   const clearAllPick = () => setPickedRowIndices(new Set());
+
+  const defaultPickSaveFilename = () => {
+    const d = new Date();
+    const p = (n: number) => String(n).padStart(2, '0');
+    return `my_pick_${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}_${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}.xlsx`;
+  };
+
+  /** New file name for Save Excel / Save and Close (local date + time). */
+  const buildNewSaveExcelFilename = () => {
+    const d = new Date();
+    const p = (n: number) => String(n).padStart(2, '0');
+    const dateStr = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+    const timeStr = `${p(d.getHours())}-${p(d.getMinutes())}-${p(d.getSeconds())}`;
+    if (useCustomFormat && customFormat?.name) {
+      const slug = customFormat.name
+        .replace(/[^a-z0-9]+/gi, '_')
+        .replace(/^_+|_+$/g, '')
+        .slice(0, 48) || 'format';
+      return `${slug}_${dateStr}_${timeStr}.xlsx`;
+    }
+    return `employee_data_${labourType.toLowerCase()}_${dateStr}_${timeStr}.xlsx`;
+  };
+
+  /**
+   * fileId + formatId + rowIndices for API.
+   * For NEW saves (POST), only formatId is sent so files list as normal "My Saved Excel Files".
+   * rowIndices on POST made every template-row save a "pick" file (My data only) — avoid that.
+   * Row indices are sent only when updating an existing file (PUT) for pick/template sync.
+   */
+  useEffect(() => {
+    if (myDataDailySave?.defaultFilename) {
+      setMyDataSaveFilename(myDataDailySave.defaultFilename);
+    }
+  }, [myDataDailySave?.defaultFilename]);
+
+  const appendFormatPickMetaToFormData = (
+    formData: FormData,
+    explicitPutId?: string | null,
+    options?: { omitRowIndices?: boolean }
+  ) => {
+    let fid: string | null;
+    if (explicitPutId === undefined) {
+      fid = currentEditingFileId ?? null;
+    } else {
+      fid = explicitPutId;
+    }
+    if (fid) {
+      formData.append('fileId', fid);
+    }
+    if (!useCustomFormat || !formatId) return;
+    formData.append('formatId', formatId);
+    if (!fid) return;
+    if (options?.omitRowIndices) return;
+    const fromTemplateMeta = rows.map((r) => getPickTemplateRowIndex(r));
+    let indicesForSave: number[] | null = null;
+    if (fromTemplateMeta.every((x): x is number => x !== null)) {
+      indicesForSave = fromTemplateMeta as number[];
+    } else {
+      const fromEditing = editingPickedIndices.filter((x): x is number => x !== null && x >= 0);
+      if (fromEditing.length === rows.length) indicesForSave = fromEditing;
+    }
+    if (indicesForSave && indicesForSave.length === rows.length) {
+      formData.append('rowIndices', JSON.stringify(indicesForSave));
+    }
+  };
 
   const savePickData = async () => {
     const name = (savePickFilename || '').trim();
@@ -704,17 +835,24 @@ export default function ExcelCreator({ labourType, onFileCreated, onSaveAndClose
       setMessage({ type: 'error', text: 'Please pick at least one row (use the Pick column).' });
       return;
     }
-    const selectedRows = Array.from(pickedRowIndices)
-      .sort((a, b) => a - b)
-      .map((i) => rows[i])
-      .filter(Boolean)
-      .map((row) => {
+    const activeTemplateIdx = new Set(
+      rows.map((row) => getPickTemplateRowIndex(row)).filter((x): x is number => x !== null)
+    );
+    const indicesForSave = Array.from(pickedRowIndices)
+      .filter((t) => activeTemplateIdx.has(t))
+      .sort((a, b) => a - b);
+    const selectedRows = indicesForSave
+      .map((t) => {
+        const row = rows.find((r) => getPickTemplateRowIndex(r) === t);
+        if (!row) return null;
+        const clean = stripTemplateRowMeta(row);
         const obj: ExcelRow = {};
         columnNames.forEach((col) => {
-          obj[col] = row[col] !== undefined && row[col] !== null ? row[col] : '';
+          obj[col] = clean[col] !== undefined && clean[col] !== null ? clean[col] : '';
         });
         return obj;
-      });
+      })
+      .filter(Boolean) as ExcelRow[];
     if (selectedRows.length === 0) {
       setMessage({ type: 'error', text: 'No rows to save.' });
       return;
@@ -735,7 +873,7 @@ export default function ExcelCreator({ labourType, onFileCreated, onSaveAndClose
       if (useCustomFormat && formatId) {
         formData.append('isPickSave', 'true');
         formData.append('formatId', formatId);
-        formData.append('rowIndices', JSON.stringify(Array.from(pickedRowIndices).sort((a, b) => a - b)));
+        formData.append('rowIndices', JSON.stringify(indicesForSave));
       }
       const res = await fetch('/api/employee/save-excel', {
         method: 'POST',
@@ -747,8 +885,8 @@ export default function ExcelCreator({ labourType, onFileCreated, onSaveAndClose
         setShowSavePickModal(false);
         setSavePickFilename('');
         setPickedRowIndices(new Set());
-        setMessage({ type: 'success', text: `Saved "${filename}". It appears in My Saved Excel Files — you can work with it there (bulk, save, etc.) and it will show in admin.` });
-        if (onSaveSuccess) onSaveSuccess();
+        setMessage({ type: 'success', text: `Saved "${filename}". Pick files appear under My data; open Work with this to edit.` });
+        if (onSaveSuccess) await Promise.resolve(onSaveSuccess());
         if (useCustomFormat && formatId && token) {
           fetch(`/api/employee/picked-rows?formatId=${encodeURIComponent(formatId)}`, { headers: { Authorization: `Bearer ${token}` } })
             .then((r) => r.json())
@@ -777,167 +915,191 @@ export default function ExcelCreator({ labourType, onFileCreated, onSaveAndClose
     }
   };
 
+  const runServerSave = async (opts: {
+    putFileId: string | null;
+    filename: string;
+    closeAfter?: boolean;
+  }): Promise<boolean> => {
+    const { putFileId, filename, closeAfter } = opts;
+    const method = putFileId ? 'PUT' : 'POST';
+    const workbook = XLSX.utils.book_new();
+    const worksheet = XLSX.utils.json_to_sheet(rows.map(stripTemplateRowMeta));
+    const colWidths = columnNames.map(() => ({ wch: 20 }));
+    worksheet['!cols'] = colWidths;
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Data');
+    const excelBuffer = XLSX.write(workbook, { type: 'array', bookType: 'xlsx' });
+    const blob = new Blob([excelBuffer], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+    const fn = filename.endsWith('.xlsx') ? filename : `${filename}.xlsx`;
+    const file = new File([blob], fn, {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
+
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('labourType', labourType);
+    formData.append('rowCount', rows.length.toString());
+    appendFormatPickMetaToFormData(formData, putFileId, {
+      omitRowIndices: !!myDataDailySave,
+    });
+
+    const response = await fetch('/api/employee/save-excel', {
+      method,
+      headers: { Authorization: `Bearer ${token}` },
+      body: formData,
+    });
+
+    const result = await response.json();
+
+    if (!response.ok || !result.success) {
+      if (result.validationError || response.status === 400) {
+        const errorMsg = result.error || 'Validation failed';
+        const duplicateErrors = result.duplicateErrors || [];
+        const lockedColumnErrors = result.lockedColumnErrors || [];
+        const dropdownErrors = result.dropdownErrors || [];
+        const missingCols = result.missingColumns || [];
+
+        let detailedError = `❌ FILE NOT SAVED - VALIDATION FAILED\n\n`;
+        detailedError += `Reason: ${errorMsg}\n\n`;
+
+        if (duplicateErrors.length > 0) {
+          detailedError += `🚫 DUPLICATE VALUES FOUND IN UNIQUE COLUMNS:\n`;
+          duplicateErrors.forEach((err: string) => {
+            detailedError += `  • ${err}\n`;
+          });
+          detailedError += `\n⚠️ ACTION REQUIRED: Remove duplicate values before saving.\n\n`;
+          alert(
+            `❌ DUPLICATE VALUES DETECTED!\n\n${duplicateErrors.map((err: string) => `• ${err}`).join('\n')}\n\nFile was NOT saved. Please fix duplicates and try again.`
+          );
+        }
+
+        if (dropdownErrors.length > 0) {
+          detailedError += `📋 INVALID DROPDOWN VALUES:\n`;
+          dropdownErrors.forEach((err: string) => {
+            detailedError += `  • ${err}\n`;
+          });
+          detailedError += `\n⚠️ ACTION REQUIRED: Use only allowed dropdown options.\n\n`;
+          alert(
+            `❌ INVALID DROPDOWN VALUES DETECTED!\n\n${dropdownErrors.map((err: string) => `• ${err}`).join('\n')}\n\nFile was NOT saved. Please use only allowed options and try again.`
+          );
+        }
+
+        if (lockedColumnErrors && lockedColumnErrors.length > 0) {
+          detailedError += `🔒 LOCKED COLUMN ERRORS:\n`;
+          lockedColumnErrors.forEach((err: string) => {
+            detailedError += `  • ${err}\n`;
+          });
+          detailedError += `\n`;
+        }
+
+        if (missingCols.length > 0) {
+          detailedError += `Missing columns: ${missingCols.join(', ')}\n`;
+        }
+
+        setMessage({ type: 'error', text: detailedError });
+        return false;
+      }
+      setMessage({ type: 'error', text: result.error || 'Failed to save Excel file' });
+      return false;
+    }
+
+    const savedRowCount = rows.length;
+    if (method === 'PUT') {
+      let successText = `File updated successfully! (${savedRowCount} rows). You can add more rows, remove rows, or save again.`;
+      if (myDataDailySave) {
+        successText = `Saved “${fn}” (${savedRowCount} rows). Edits today update this same file.`;
+      }
+      if (result.data?.updatedMergedFiles && result.data.updatedMergedFiles.length > 0) {
+        successText += `\n\n✅ Auto-updated ${result.data.updatedMergedFiles.length} merged file(s).`;
+        alert(`✅ File Updated!\n\n📋 Auto-updated ${result.data.updatedMergedFiles.length} merged file(s).`);
+      }
+      setMessage({ type: 'success', text: successText });
+    } else {
+      if (myDataDailySave) {
+        if (result.data?.id) {
+          setCurrentEditingFileId(result.data.id);
+          onMyDataDailyFileSaved?.(result.data.id, fn);
+        }
+        let successText = `Saved “${fn}” for today (${savedRowCount} rows). Saving again today updates this file.`;
+        if (result.data?.updatedMergedFiles && result.data.updatedMergedFiles.length > 0) {
+          successText += `\n\n✅ Auto-updated ${result.data.updatedMergedFiles.length} merged file(s).`;
+          alert(`✅ File Saved!\n\n📋 Auto-updated ${result.data.updatedMergedFiles.length} merged file(s).`);
+        }
+        setMessage({ type: 'success', text: successText });
+      } else {
+        setCurrentEditingFileId(undefined);
+        let successText = `Excel file saved successfully! (${savedRowCount} rows) File saved and form cleared. You can now add new data.`;
+        if (result.data?.updatedMergedFiles && result.data.updatedMergedFiles.length > 0) {
+          successText += `\n\n✅ Auto-updated ${result.data.updatedMergedFiles.length} merged file(s):\n${result.data.updatedMergedFiles.map((name: string) => `  • ${name}`).join('\n')}\n\nAdmin will be notified.`;
+          alert(`✅ File Saved!\n\n📋 Auto-updated ${result.data.updatedMergedFiles.length} merged file(s).`);
+        }
+        setRows([]);
+        setMessage({ type: 'success', text: successText });
+        if (onFileCreated) onFileCreated(file);
+      }
+    }
+
+    if (onSaveSuccess) await Promise.resolve(onSaveSuccess());
+    if (closeAfter) {
+      if (!myDataDailySave) {
+        setCurrentEditingFileId(undefined);
+        setRows([]);
+      }
+      onSaveAndClose?.();
+    }
+    setShowMyDataSaveModal(false);
+    setMyDataPendingAction(null);
+    return true;
+  };
+
   const saveExcel = async () => {
     if (rows.length === 0) {
       setMessage({ type: 'error', text: 'Please add at least one row of data' });
       return;
     }
-
     if (!token) {
       setMessage({ type: 'error', text: 'Authentication required to save files' });
       return;
     }
 
+    if (myDataDailySave) {
+      setMyDataSaveFilename((prev) => (prev.trim() ? prev : myDataDailySave.defaultFilename));
+      setMyDataPendingAction('save');
+      setShowMyDataSaveModal(true);
+      return;
+    }
+
     try {
       setSaving(true);
-
-      // Create workbook
-      const workbook = XLSX.utils.book_new();
-      
-      // Convert rows to worksheet
-      const worksheet = XLSX.utils.json_to_sheet(rows);
-      
-      // Set column widths
-      const colWidths = columnNames.map(() => ({ wch: 20 }));
-      worksheet['!cols'] = colWidths;
-      
-      // Add worksheet to workbook
-      XLSX.utils.book_append_sheet(workbook, worksheet, 'Data');
-      
-      // Generate Excel file
-      const excelBuffer = XLSX.write(workbook, { type: 'array', bookType: 'xlsx' });
-      const blob = new Blob([excelBuffer], { 
-        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' 
+      const filename =
+        currentEditingFileId && editingFileName ? editingFileName : buildNewSaveExcelFilename();
+      await runServerSave({
+        putFileId: currentEditingFileId ?? null,
+        filename,
       });
-      
-      // Create file with date and time in filename
-      const now = new Date();
-      const dateStr = now.toISOString().split('T')[0]; // YYYY-MM-DD
-      const timeStr = now.toTimeString().split(' ')[0].replace(/:/g, '-'); // HH-MM-SS
-      const filename = `employee_data_${labourType.toLowerCase()}_${dateStr}_${timeStr}.xlsx`;
-      const file = new File([blob], filename, { 
-        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' 
+    } catch (err: any) {
+      setMessage({ type: 'error', text: err.message || 'Failed to save Excel file' });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const confirmMyDataSave = async () => {
+    if (!token || !myDataDailySave) return;
+    const name = myDataSaveFilename.trim();
+    if (!name) {
+      setMessage({ type: 'error', text: 'Please enter a file name.' });
+      return;
+    }
+    try {
+      setSaving(true);
+      const closeAfter = myDataPendingAction === 'saveClose';
+      await runServerSave({
+        putFileId: myDataDailySave.putTargetId,
+        filename: name,
+        closeAfter,
       });
-
-      // Save to database
-      const formData = new FormData();
-      formData.append('file', file);
-      formData.append('labourType', labourType);
-      formData.append('rowCount', rows.length.toString());
-      if (currentEditingFileId) {
-        formData.append('fileId', currentEditingFileId); // For updating existing file
-        if (formatId) {
-          formData.append('formatId', formatId);
-          const indices = editingPickedIndices.filter((x): x is number => x !== null && x >= 0);
-          if (indices.length > 0) {
-            formData.append('rowIndices', JSON.stringify(indices));
-          }
-        }
-      }
-
-      const response = await fetch('/api/employee/save-excel', {
-        method: currentEditingFileId ? 'PUT' : 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
-        body: formData,
-      });
-
-      const result = await response.json();
-      
-      // Check HTTP status code - 400 means validation failed
-      if (!response.ok || !result.success) {
-        // Handle validation errors with detailed message
-        if (result.validationError || response.status === 400) {
-          const errorMsg = result.error || 'Validation failed';
-          const duplicateErrors = result.duplicateErrors || [];
-          const lockedColumnErrors = result.lockedColumnErrors || [];
-          const dropdownErrors = result.dropdownErrors || [];
-          const missingCols = result.missingColumns || [];
-          
-          let detailedError = `❌ FILE NOT SAVED - VALIDATION FAILED\n\n`;
-          detailedError += `Reason: ${errorMsg}\n\n`;
-          
-          // Show duplicate errors prominently with alert
-          if (duplicateErrors.length > 0) {
-            detailedError += `🚫 DUPLICATE VALUES FOUND IN UNIQUE COLUMNS:\n`;
-            duplicateErrors.forEach((err: string) => {
-              detailedError += `  • ${err}\n`;
-            });
-            detailedError += `\n⚠️ ACTION REQUIRED: Remove duplicate values before saving.\n\n`;
-            
-            // Show alert popup for duplicates
-            alert(`❌ DUPLICATE VALUES DETECTED!\n\n${duplicateErrors.map((err: string) => `• ${err}`).join('\n')}\n\nFile was NOT saved. Please fix duplicates and try again.`);
-          }
-          
-          // Show dropdown errors prominently with alert
-          if (dropdownErrors.length > 0) {
-            detailedError += `📋 INVALID DROPDOWN VALUES:\n`;
-            dropdownErrors.forEach((err: string) => {
-              detailedError += `  • ${err}\n`;
-            });
-            detailedError += `\n⚠️ ACTION REQUIRED: Use only allowed dropdown options.\n\n`;
-            
-            // Show alert popup for dropdown errors
-            alert(`❌ INVALID DROPDOWN VALUES DETECTED!\n\n${dropdownErrors.map((err: string) => `• ${err}`).join('\n')}\n\nFile was NOT saved. Please use only allowed options and try again.`);
-          }
-          
-          // Show locked column errors
-          if (lockedColumnErrors && lockedColumnErrors.length > 0) {
-            detailedError += `🔒 LOCKED COLUMN ERRORS:\n`;
-            lockedColumnErrors.forEach((err: string) => {
-              detailedError += `  • ${err}\n`;
-            });
-            detailedError += `\n`;
-          }
-          
-          if (missingCols.length > 0) {
-            detailedError += `Missing columns: ${missingCols.join(', ')}\n`;
-          }
-          
-          setMessage({ 
-            type: 'error', 
-            text: detailedError 
-          });
-          setSaving(false);
-          return; // Stop here - don't save the file
-        } else {
-          setMessage({ type: 'error', text: result.error || 'Failed to save Excel file' });
-          setSaving(false);
-          return;
-        }
-      }
-
-      if (result.success) {
-        const wasEditing = !!currentEditingFileId;
-        const savedRowCount = rows.length;
-
-        if (wasEditing) {
-          // Update (PUT): keep editing same file — do not clear form or file id so they can add/remove rows and save again
-          let successText = `File updated successfully! (${savedRowCount} rows). You can add more rows, remove rows, or save again.`;
-          if (result.data?.updatedMergedFiles && result.data.updatedMergedFiles.length > 0) {
-            successText += `\n\n✅ Auto-updated ${result.data.updatedMergedFiles.length} merged file(s).`;
-            alert(`✅ File Updated!\n\n📋 Auto-updated ${result.data.updatedMergedFiles.length} merged file(s).`);
-          }
-          setMessage({ type: 'success', text: successText });
-        } else {
-          // New file (POST): clear form so next save creates a new file
-          setCurrentEditingFileId(undefined);
-          let successText = `Excel file saved successfully! (${savedRowCount} rows) File saved and form cleared. You can now add new data.`;
-          if (result.data?.updatedMergedFiles && result.data.updatedMergedFiles.length > 0) {
-            successText += `\n\n✅ Auto-updated ${result.data.updatedMergedFiles.length} merged file(s):\n${result.data.updatedMergedFiles.map((name: string) => `  • ${name}`).join('\n')}\n\nAdmin will be notified.`;
-            alert(`✅ File Saved!\n\n📋 Auto-updated ${result.data.updatedMergedFiles.length} merged file(s).`);
-          }
-          setRows([]);
-          setMessage({ type: 'success', text: successText });
-          if (onFileCreated) onFileCreated(file);
-        }
-        
-        // Call onSaveSuccess to refresh saved files list
-        if (onSaveSuccess) {
-          onSaveSuccess();
-        }
-      }
     } catch (err: any) {
       setMessage({ type: 'error', text: err.message || 'Failed to save Excel file' });
     } finally {
@@ -1106,8 +1268,18 @@ export default function ExcelCreator({ labourType, onFileCreated, onSaveAndClose
               <span className="text-sm text-gray-600">
                 {(() => {
                   const showPickColumn = useCustomFormat && !currentEditingFileId;
-                  const pickableCount = showPickColumn ? rows.filter((_, i) => !pickedByOthers[i]).length : rows.length;
-                  const lockedCount = showPickColumn ? rows.filter((_, i) => pickedByOthers[i]).length : 0;
+                  let pickableCount = rows.length;
+                  let lockedCount = 0;
+                  if (showPickColumn) {
+                    pickableCount = 0;
+                    lockedCount = 0;
+                    rows.forEach((row) => {
+                      const t = getPickTemplateRowIndex(row);
+                      if (t === null) return;
+                      if (pickedByOthers[t]) lockedCount++;
+                      else pickableCount++;
+                    });
+                  }
                   const searchTrim = debouncedRowSearch.trim();
                   const total = rows.length;
                   const matched = searchTrim
@@ -1175,19 +1347,28 @@ export default function ExcelCreator({ labourType, onFileCreated, onSaveAndClose
                     </tr>
                   ) : (
                     filteredEntries.map(({ row, templateIndex: rowIndex }) => {
-                      const lockedBy = showPickColumn ? pickedByOthers[rowIndex] : null;
+                      const pickT = getPickTemplateRowIndex(row);
+                      const lockedBy = showPickColumn && pickT !== null ? pickedByOthers[pickT] : null;
                       return (
                         <tr
-                          key={rowIndex}
+                          key={`r-${rowIndex}-${pickT ?? 'm'}`}
                           className={lockedBy ? 'bg-gray-100 hover:bg-gray-200' : 'hover:bg-[#e8f4ea]'}
                         >
                           <td className="px-2 py-1 text-center text-xs font-medium text-gray-600 border border-gray-300 bg-[#f3f4f6] w-12">{rowIndex + 1}</td>
                           {showPickColumn && (
                             <td
-                              className={`px-2 py-1 text-center border border-gray-300 w-24 align-top ${lockedBy ? 'bg-gray-200' : 'bg-white'}`}
-                              title={lockedBy ? `Picked by: ${lockedBy.empName} (${lockedBy.empId}) — you cannot pick this row` : undefined}
+                              className={`px-2 py-1 text-center border border-gray-300 w-24 align-top ${lockedBy ? 'bg-gray-200' : pickT === null ? 'bg-gray-50' : 'bg-white'}`}
+                              title={
+                                pickT === null
+                                  ? 'This row is not from the admin template — add from template rows to pick'
+                                  : lockedBy
+                                    ? `Picked by: ${lockedBy.empName} (${lockedBy.empId}) — you cannot pick this row`
+                                    : undefined
+                              }
                             >
-                              {lockedBy ? (
+                              {pickT === null ? (
+                                <span className="text-[10px] text-gray-400">—</span>
+                              ) : lockedBy ? (
                                 <span className="inline-flex items-center gap-1 text-gray-500 text-xs" title={`Picked by: ${lockedBy.empName} (${lockedBy.empId})`}>
                                   <svg className="w-4 h-4 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20" aria-hidden="true">
                                     <path fillRule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clipRule="evenodd" />
@@ -1197,7 +1378,7 @@ export default function ExcelCreator({ labourType, onFileCreated, onSaveAndClose
                               ) : (
                                 <input
                                   type="checkbox"
-                                  checked={pickedRowIndices.has(rowIndex)}
+                                  checked={pickedRowIndices.has(pickT)}
                                   onChange={() => togglePick(rowIndex)}
                                   title="Pick this row"
                                   className="h-4 w-4 cursor-pointer"
@@ -1268,10 +1449,18 @@ export default function ExcelCreator({ labourType, onFileCreated, onSaveAndClose
             role="toolbar"
             aria-label="Row actions"
           >
-            {useCustomFormat && !currentEditingFileId && rows.filter((_, i) => !pickedByOthers[i]).length > 0 && (
+            {useCustomFormat &&
+              !currentEditingFileId &&
+              rows.some((row) => {
+                const t = getPickTemplateRowIndex(row);
+                return t !== null && !pickedByOthers[t];
+              }) && (
               <button
                 type="button"
-                onClick={() => setShowSavePickModal(true)}
+                onClick={() => {
+                  setSavePickFilename((prev) => (prev.trim() ? prev : defaultPickSaveFilename()));
+                  setShowSavePickModal(true);
+                }}
                 className="px-4 py-2 bg-[#217346] text-white rounded-md hover:bg-[#1a5c38] cursor-pointer"
               >
                 Save my pick
@@ -1318,75 +1507,23 @@ export default function ExcelCreator({ labourType, onFileCreated, onSaveAndClose
                     setMessage({ type: 'error', text: 'Please add at least one row of data' });
                     return;
                   }
-                  
-                  // Save first, then close
+                  if (!token) return;
+                  if (myDataDailySave) {
+                    setMyDataSaveFilename((prev) => (prev.trim() ? prev : myDataDailySave.defaultFilename));
+                    setMyDataPendingAction('saveClose');
+                    setShowMyDataSaveModal(true);
+                    return;
+                  }
                   try {
                     setSaving(true);
-                    // Create workbook
-                    const workbook = XLSX.utils.book_new();
-                    const worksheet = XLSX.utils.json_to_sheet(rows);
-                    const colWidths = columnNames.map(() => ({ wch: 20 }));
-                    worksheet['!cols'] = colWidths;
-                    XLSX.utils.book_append_sheet(workbook, worksheet, 'Data');
-                    const excelBuffer = XLSX.write(workbook, { type: 'array', bookType: 'xlsx' });
-                    const blob = new Blob([excelBuffer], { 
-                        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' 
+                    const filename =
+                      currentEditingFileId && editingFileName ? editingFileName : buildNewSaveExcelFilename();
+                    const ok = await runServerSave({
+                      putFileId: currentEditingFileId ?? null,
+                      filename,
+                      closeAfter: true,
                     });
-                    const now = new Date();
-                    const dateStr = now.toISOString().split('T')[0];
-                    const timeStr = now.toTimeString().split(' ')[0].replace(/:/g, '-');
-                    const filename = `employee_data_${labourType.toLowerCase()}_${dateStr}_${timeStr}.xlsx`;
-                    const file = new File([blob], filename, { 
-                        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' 
-                    });
-                    const formData = new FormData();
-                    formData.append('file', file);
-                    formData.append('labourType', labourType);
-                    formData.append('rowCount', rows.length.toString());
-                    if (currentEditingFileId) {
-                        formData.append('fileId', currentEditingFileId);
-                    }
-                    const response = await fetch('/api/employee/save-excel', {
-                        method: currentEditingFileId ? 'PUT' : 'POST',
-                        headers: { 'Authorization': `Bearer ${token}` },
-                        body: formData,
-                    });
-                    const result = await response.json();
-                    
-                    // Check HTTP status code - 400 means validation failed
-                    if (!response.ok || !result.success) {
-                        if (result.validationError || response.status === 400) {
-                            const duplicateErrors = result.duplicateErrors || [];
-                            const errorMsg = result.error || 'Validation failed';
-                            
-                            if (duplicateErrors.length > 0) {
-                                alert(`❌ DUPLICATE VALUES DETECTED!\n\n${duplicateErrors.map((err: string) => `• ${err}`).join('\n')}\n\nFile was NOT saved. Please fix duplicates and try again.`);
-                            } else {
-                                alert(`❌ VALIDATION FAILED\n\n${errorMsg}\n\nFile was NOT saved.`);
-                            }
-                            setSaving(false);
-                            return;
-                        }
-                        alert(`❌ ERROR\n\n${result.error || 'Failed to save file'}\n\nFile was NOT saved.`);
-                        setSaving(false);
-                        return;
-                    }
-                    
-                    if (result.success) {
-                        const wasEditing = !!currentEditingFileId;
-                        setCurrentEditingFileId(undefined); // Clear so next save creates new file
-                        const savedRowCount = rows.length;
-                        setRows([]); // Clear rows after save
-                        setMessage({ type: 'success', text: wasEditing ? 'File updated successfully!' : 'File saved successfully!' });
-                        if (onFileCreated) onFileCreated(file);
-                        if (onSaveSuccess) onSaveSuccess(); // Refresh saved files list
-                        // Close after successful save
-                        setTimeout(() => {
-                            if (onSaveAndClose) onSaveAndClose();
-                        }, 300);
-                    } else {
-                        setMessage({ type: 'error', text: result.error || 'Failed to save file' });
-                    }
+                    if (!ok) setSaving(false);
                   } catch (err: any) {
                     setMessage({ type: 'error', text: err.message || 'Failed to save file' });
                   } finally {
@@ -1409,6 +1546,46 @@ export default function ExcelCreator({ labourType, onFileCreated, onSaveAndClose
           </div>
         </>
       )}
+      {showMyDataSaveModal && myDataDailySave && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+          onClick={() => !saving && setShowMyDataSaveModal(false)}
+        >
+          <div className="bg-white rounded-lg shadow-xl p-6 max-w-md w-full mx-4" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-semibold text-gray-800 mb-2">Save today&apos;s file</h3>
+            <p className="text-sm text-gray-600 mb-3">
+              One file per day for this format: saving again today updates the same file. A new calendar day creates a new file. Default name uses today&apos;s date.
+            </p>
+            <label className="block text-xs font-medium text-gray-600 mb-1">File name</label>
+            <input
+              type="text"
+              value={myDataSaveFilename}
+              onChange={(e) => setMyDataSaveFilename(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-md mb-4"
+              autoFocus
+            />
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => !saving && setShowMyDataSaveModal(false)}
+                className="px-4 py-2 text-gray-700 bg-gray-200 rounded-md hover:bg-gray-300"
+                disabled={saving}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void confirmMyDataSave()}
+                disabled={saving}
+                className="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 disabled:opacity-60"
+              >
+                {saving ? 'Saving...' : 'Save'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showSavePickModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => !savingPick && setShowSavePickModal(false)}>
           <div className="bg-white rounded-lg shadow-xl p-6 max-w-md w-full mx-4" onClick={(e) => e.stopPropagation()}>
@@ -1432,13 +1609,15 @@ export default function ExcelCreator({ labourType, onFileCreated, onSaveAndClose
 
       {showAddFromFileModal && templateRows.length > 0 && (() => {
         const searchTrim = addFromFileSearchDebounced.trim().toLowerCase();
+        const withTemplateIdx = templateRows.map((row) => ({
+          row,
+          templateIdx: getPickTemplateRowIndex(row as ExcelRow) as number,
+        }));
         const filteredEntries = searchTrim
-          ? templateRows
-              .map((row, idx) => ({ row, idx }))
-              .filter(({ row }) =>
-                columns.some((col) => String(row[col.name] ?? '').toLowerCase().includes(searchTrim))
-              )
-          : templateRows.map((row, idx) => ({ row, idx }));
+          ? withTemplateIdx.filter(({ row }) =>
+              columns.some((col) => String(row[col.name] ?? '').toLowerCase().includes(searchTrim))
+            )
+          : withTemplateIdx;
         return (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setShowAddFromFileModal(false)}>
           <div className="bg-white rounded-lg shadow-xl p-6 max-w-[95vw] w-full mx-4 max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
@@ -1473,11 +1652,11 @@ export default function ExcelCreator({ labourType, onFileCreated, onSaveAndClose
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredEntries.map(({ row, idx }) => {
-                    const taken = pickedByOthers[idx];
-                    const checked = addFromFileSelected.has(idx);
+                  {filteredEntries.map(({ row, templateIdx }) => {
+                    const taken = pickedByOthers[templateIdx];
+                    const checked = addFromFileSelected.has(templateIdx);
                     return (
-                      <tr key={idx} className={taken ? 'bg-gray-50' : ''}>
+                      <tr key={templateIdx} className={taken ? 'bg-gray-50' : ''}>
                         <td className={`px-2 py-1 border border-gray-200 sticky left-0 border-r border-gray-200 z-[1] ${taken ? 'bg-gray-50' : 'bg-white'}`}>
                           <input
                             type="checkbox"
@@ -1487,8 +1666,8 @@ export default function ExcelCreator({ labourType, onFileCreated, onSaveAndClose
                               if (taken) return;
                               setAddFromFileSelected((prev) => {
                                 const next = new Set(prev);
-                                if (next.has(idx)) next.delete(idx);
-                                else next.add(idx);
+                                if (next.has(templateIdx)) next.delete(templateIdx);
+                                else next.add(templateIdx);
                                 return next;
                               });
                             }}
@@ -1548,11 +1727,15 @@ export default function ExcelCreator({ labourType, onFileCreated, onSaveAndClose
                       setMessage({ type: 'error', text: 'Some rows could not be released. They were still removed from your file.' });
                     }
                   }
-                  const newRows = sorted.map((i) => {
-                    const tr = templateRows[i] || {};
-                    const row: ExcelRow = {};
+                  const newRows = sorted.map((t) => {
+                    const tr =
+                      templateRows.find((r) => getPickTemplateRowIndex(r as ExcelRow) === t) ||
+                      ({} as Record<string, unknown>);
+                    const row = {} as ExcelRow;
+                    (row as Record<string, unknown>)[TEMPLATE_ROW_INDEX] = t;
                     columns.forEach((col) => {
-                      row[col.name] = tr[col.name] !== undefined && tr[col.name] !== null ? tr[col.name] : '';
+                      row[col.name] =
+                        tr[col.name] !== undefined && tr[col.name] !== null ? (tr[col.name] as string | number) : '';
                     });
                     return row;
                   });
@@ -1566,7 +1749,7 @@ export default function ExcelCreator({ labourType, onFileCreated, onSaveAndClose
                     try {
                       setSaving(true);
                       const workbook = XLSX.utils.book_new();
-                      const worksheet = XLSX.utils.json_to_sheet(newRows);
+                      const worksheet = XLSX.utils.json_to_sheet(newRows.map(stripTemplateRowMeta));
                       const colWidths = columnNames.map(() => ({ wch: 20 }));
                       worksheet['!cols'] = colWidths;
                       XLSX.utils.book_append_sheet(workbook, worksheet, 'Data');
@@ -1594,7 +1777,7 @@ export default function ExcelCreator({ labourType, onFileCreated, onSaveAndClose
                       const result = await res.json();
                       if (result.success) {
                         setMessage({ type: 'success', text: `File saved with ${sorted.length} row(s).${releasedText}` });
-                        if (onSaveSuccess) onSaveSuccess();
+                        if (onSaveSuccess) await Promise.resolve(onSaveSuccess());
                       } else {
                         setMessage({ type: 'error', text: result.error || 'File could not be saved. You can try Save Excel.' });
                       }

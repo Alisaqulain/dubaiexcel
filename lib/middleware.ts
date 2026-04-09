@@ -71,6 +71,16 @@ export function withViewAccess(handler: (req: AuthenticatedRequest) => Promise<N
   });
 }
 
+/** Employee login only (collaborative data pick / edit own rows). */
+export function withEmployee(handler: (req: AuthenticatedRequest) => Promise<NextResponse>) {
+  return withAuth(async (req: AuthenticatedRequest) => {
+    if (req.user?.role !== 'employee') {
+      return NextResponse.json({ error: 'Employee access required' }, { status: 403 });
+    }
+    return handler(req);
+  });
+}
+
 /**
  * Middleware for users with upload permission (User role can upload for their projects, Employees can upload)
  */

@@ -7,8 +7,10 @@ import Employee from '@/models/Employee';
 import ExcelFormat from '@/models/ExcelFormat';
 import FormatTemplateData from '@/models/FormatTemplateData';
 import PickedTemplateRow from '@/models/PickedTemplateRow';
+import { isTemplateRowDeleted } from '@/lib/formatTemplateRows';
 import * as XLSX from 'xlsx';
 import mongoose from 'mongoose';
+import { emitFormatDailyMergeInvalidate } from '@/lib/unifiedDataSocket';
 
 /**
  * POST /api/employee/save-excel
@@ -176,6 +178,19 @@ async function handleSaveExcel(req: AuthenticatedRequest) {
       );
     }
 
+    const dataRowCount = jsonData.length - 1;
+    if (req.method === 'PUT' && pickRowIndices.length !== dataRowCount && dataRowCount > 0) {
+      const earlyFileId = formData.get('fileId') as string;
+      if (earlyFileId) {
+        const ef = await CreatedExcelFile.findById(earlyFileId).select('pickedTemplateRowIndices').lean();
+        const stored =
+          ef && Array.isArray((ef as any).pickedTemplateRowIndices) ? (ef as any).pickedTemplateRowIndices : [];
+        if (stored.length === dataRowCount) {
+          pickRowIndices = stored.filter((i: number) => typeof i === 'number' && i >= 0);
+        }
+      }
+    }
+
     const headers = ((jsonData[0] as any[]) || []).map((h: any) => String(h || '').trim());
     const formatColumns = (assignedFormat as any).columns.sort((a: any, b: any) => a.order - b.order);
     const requiredColumns = formatColumns.filter((col: any) => col.required).map((col: any) => col.name.trim());
@@ -211,13 +226,19 @@ async function handleSaveExcel(req: AuthenticatedRequest) {
     const warnings: string[] = [];
 
     if (lockedColumns.length > 0 && templateData && templateData.rows && templateData.rows.length > 0) {
-      // Check each row against template data
+      // Check each file row against the correct template row (pick files use rowIndices, not file order).
       const dataRows = jsonData.slice(1); // Skip header row
-      
-      for (let rowIndex = 0; rowIndex < Math.min(dataRows.length, templateData.rows.length); rowIndex++) {
+      const usePickIndexMap =
+        pickRowIndices.length === dataRows.length && pickRowIndices.length > 0;
+
+      for (let rowIndex = 0; rowIndex < dataRows.length; rowIndex++) {
         const userRow = dataRows[rowIndex] as any[];
-        const templateRow = templateData.rows[rowIndex] as Record<string, any>;
-        
+        let templateRowNum = usePickIndexMap ? pickRowIndices[rowIndex] : rowIndex;
+        if (typeof templateRowNum !== 'number' || templateRowNum < 0) continue;
+        if (templateRowNum >= templateData.rows.length) continue;
+        if (isTemplateRowDeleted(templateData.rows[templateRowNum])) continue;
+
+        const templateRow = templateData.rows[templateRowNum] as Record<string, any>;
         if (!userRow || !templateRow) continue;
 
         lockedColumns.forEach((col: any) => {
@@ -643,6 +664,9 @@ async function handleSaveExcel(req: AuthenticatedRequest) {
         }
       }
 
+      const fmtStr = existingFile.formatId?.toString?.();
+      if (fmtStr) emitFormatDailyMergeInvalidate({ formatId: fmtStr });
+
       return NextResponse.json({
         success: true,
         message: 'Excel file updated successfully',
@@ -671,12 +695,28 @@ async function handleSaveExcel(req: AuthenticatedRequest) {
         createdByName: userName,
         createdByEmail: userEmail,
       };
+      const assignedFormatIdStr = (assignedFormat as any)._id.toString();
       if (isPickSave && pickFormatId && pickRowIndices.length > 0) {
         createPayload.formatId = new mongoose.Types.ObjectId(pickFormatId);
         createPayload.pickedTemplateRowIndices = pickRowIndices;
+      } else {
+        const linkFormatId = formData.get('formatId') as string;
+        if (
+          linkFormatId &&
+          mongoose.Types.ObjectId.isValid(linkFormatId) &&
+          linkFormatId === assignedFormatIdStr
+        ) {
+          createPayload.formatId = new mongoose.Types.ObjectId(linkFormatId);
+          if (pickRowIndices.length > 0) {
+            createPayload.pickedTemplateRowIndices = pickRowIndices;
+          }
+        }
       }
       const createdFile = await CreatedExcelFile.create(createPayload);
       const doc = Array.isArray(createdFile) ? createdFile[0] : createdFile;
+
+      const newFmtStr = doc.formatId?.toString?.();
+      if (newFmtStr) emitFormatDailyMergeInvalidate({ formatId: newFmtStr });
 
       return NextResponse.json({
         success: true,

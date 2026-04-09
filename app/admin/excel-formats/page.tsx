@@ -1190,7 +1190,7 @@ function ExcelFormatsComponent() {
           </div>
         </div>
 
-        {/* Upload Excel to Create Format */}
+        {/* Upload Excel to Create Format — disabled for now (re-enable when imports should be allowed again)
         <div className="bg-white rounded-lg shadow p-6 mb-6">
           <h2 className="text-xl font-semibold mb-4">Import Format from Excel</h2>
           <p className="text-sm text-gray-600 mb-4">
@@ -1204,6 +1204,7 @@ function ExcelFormatsComponent() {
             className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-purple-50 file:text-purple-700 hover:file:bg-purple-100"
           />
         </div>
+        */}
 
         {showForm && (
           <div className="bg-white rounded-lg shadow p-6 mb-6">

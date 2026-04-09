@@ -6,8 +6,9 @@ interface User {
   id: string;
   email: string;
   username?: string;
-  role: 'super-admin' | 'admin' | 'user';
+  role: 'super-admin' | 'admin' | 'user' | 'employee';
   name?: string;
+  empId?: string;
   allottedProjects?: string[];
 }
 

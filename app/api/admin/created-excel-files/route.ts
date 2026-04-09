@@ -15,6 +15,10 @@ async function handleGetCreatedExcelFiles(req: AuthenticatedRequest) {
     // Get query parameters
     const { searchParams } = new URL(req.url);
     const labourType = searchParams.get('labourType');
+    const rangeStart = searchParams.get('rangeStart');
+    const rangeEnd = searchParams.get('rangeEnd');
+    const formatId = searchParams.get('formatId');
+    const isMergedParam = searchParams.get('isMerged');
     const limit = parseInt(searchParams.get('limit') || '1000'); // Increased limit to show more files
     const skip = parseInt(searchParams.get('skip') || '0');
 
@@ -22,6 +26,23 @@ async function handleGetCreatedExcelFiles(req: AuthenticatedRequest) {
     const query: any = {};
     if (labourType && ['OUR_LABOUR', 'SUPPLY_LABOUR', 'SUBCONTRACTOR'].includes(labourType)) {
       query.labourType = labourType;
+    }
+    if (formatId) {
+      query.formatId = formatId;
+    }
+    if (isMergedParam === 'true') query.isMerged = true;
+    if (isMergedParam === 'false') query.isMerged = false;
+    if (rangeStart || rangeEnd) {
+      const createdAt: any = {};
+      if (rangeStart) {
+        const d = new Date(rangeStart);
+        if (!Number.isNaN(d.getTime())) createdAt.$gte = d;
+      }
+      if (rangeEnd) {
+        const d = new Date(rangeEnd);
+        if (!Number.isNaN(d.getTime())) createdAt.$lte = d;
+      }
+      if (Object.keys(createdAt).length) query.createdAt = createdAt;
     }
 
     // Get files with pagination, organized by date (newest first, merged files after originals)

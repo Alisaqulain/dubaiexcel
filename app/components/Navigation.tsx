@@ -55,52 +55,51 @@ export default function Navigation() {
             <Link href="/dashboard" className={`flex items-center px-3 py-2 rounded-md text-sm font-medium ${isActive('/dashboard') ? 'bg-blue-800' : 'hover:bg-blue-700'}`}>
               Dashboard
             </Link>
-            {/* Format View - for admin & super-admin, right after Dashboard */}
             {(user.role === 'super-admin' || user.role === 'admin') && (
               <Link
                 href="/admin/format-view"
-                className={`flex items-center px-3 py-2 rounded-md text-sm font-medium ${isActive('/admin/format-view') ? 'bg-blue-800' : 'hover:bg-blue-700'}`}
+                className={`flex items-center px-3 py-2 rounded-md text-sm font-medium ${
+                  isActive('/admin/format-view') || isActive('/admin/emp-pick') ? 'bg-blue-800' : 'hover:bg-blue-700'
+                }`}
               >
-                Format View
+                Format & picks
               </Link>
             )}
             {(user.role === 'super-admin' || user.role === 'admin') && (
               <Link
-                href="/admin/emp-pick"
-                className={`flex items-center px-3 py-2 rounded-md text-sm font-medium ${isActive('/admin/emp-pick') ? 'bg-blue-800' : 'hover:bg-blue-700'}`}
+                href="/admin/deleted-data"
+                className={`flex items-center px-3 py-2 rounded-md text-sm font-medium ${
+                  isActive('/admin/deleted-data') ? 'bg-blue-800' : 'hover:bg-blue-700'
+                }`}
               >
-                Emp pick
+                Deleted data
+              </Link>
+            )}
+          
+            {(user.role === 'super-admin' || user.role === 'admin') && (
+              <Link
+                href="/admin/all-merge-data"
+                className={`flex items-center px-3 py-2 rounded-md text-sm font-medium ${
+                  isActive('/admin/all-merge-data') ? 'bg-blue-800' : 'hover:bg-blue-700'
+                }`}
+              >
+                All merge data
+              </Link>
+            )}
+            {(user.role === 'super-admin' || user.role === 'admin') && (
+              <Link
+                href="/admin/excel-formats"
+                className={`flex items-center px-3 py-2 rounded-md text-sm font-medium ${
+                  isActive('/admin/excel-formats') ? 'bg-blue-800' : 'hover:bg-blue-700'
+                }`}
+              >
+                Excel formats
               </Link>
             )}
             {/* Super Admin & Admin Navigation */}
             {(user.role === 'super-admin' || user.role === 'admin') && (
               <>
-                {user.role === 'super-admin' && (
-                  <Link
-                    href="/admin/summary-report"
-                    className={`flex items-center px-3 py-2 rounded-md text-sm font-medium ${
-                      isActive('/admin/summary-report') ? 'bg-blue-800' : 'hover:bg-blue-700'
-                    }`}
-                  >
-                    Summary Report
-                  </Link>
-                )}
-                <Link
-                  href="/admin/created-excel-files"
-                  className={`flex items-center px-3 py-2 rounded-md text-sm font-medium ${
-                    isActive('/admin/created-excel-files') ? 'bg-blue-800' : 'hover:bg-blue-700'
-                  }`}
-                >
-                  Created Excel Files
-                </Link>
-                <Link
-                  href="/admin/upload"
-                  className={`flex items-center px-3 py-2 rounded-md text-sm font-medium ${
-                    isActive('/admin/upload') ? 'bg-blue-800' : 'hover:bg-blue-700'
-                  }`}
-                >
-                  Upload
-                </Link>
+            
                 <Link
                   href="/admin/employees"
                   className={`flex items-center px-3 py-2 rounded-md text-sm font-medium ${
@@ -118,56 +117,6 @@ export default function Navigation() {
                       </span>
                     </span>
                   )}
-                </Link>
-                <Link
-                  href="/admin/excel-employees"
-                  className={`flex items-center px-3 py-2 rounded-md text-sm font-medium ${
-                    isActive('/admin/excel-employees') ? 'bg-blue-800' : 'hover:bg-blue-700'
-                  }`}
-                >
-                  Excel Employees
-                </Link>
-                <Link
-                  href="/admin/excel-formats"
-                  className={`flex items-center px-3 py-2 rounded-md text-sm font-medium ${
-                    isActive('/admin/excel-formats') ? 'bg-blue-800' : 'hover:bg-blue-700'
-                  }`}
-                >
-                  Excel Formats
-                </Link>
-                <Link
-                  href="/admin/excel-merge"
-                  className={`flex items-center px-3 py-2 rounded-md text-sm font-medium ${
-                    isActive('/admin/excel-merge') ? 'bg-blue-800' : 'hover:bg-blue-700'
-                  }`}
-                >
-                  Merge Excel
-                </Link>
-                <Link
-                  href="/admin/logs"
-                  className={`flex items-center px-3 py-2 rounded-md text-sm font-medium ${
-                    isActive('/admin/logs') ? 'bg-blue-800' : 'hover:bg-blue-700'
-                  }`}
-                >
-                  Activity Logs
-                </Link>
-                {user.role === 'super-admin' && (
-                  <Link
-                    href="/admin/clear-data"
-                    className={`flex items-center px-3 py-2 rounded-md text-sm font-medium ${
-                      isActive('/admin/clear-data') ? 'bg-blue-800' : 'hover:bg-blue-700'
-                    }`}
-                  >
-                    Clear Data
-                  </Link>
-                )}
-                <Link
-                  href="/reports/download-excel"
-                  className={`flex items-center px-3 py-2 rounded-md text-sm font-medium ${
-                    isActive('/reports/download-excel') ? 'bg-blue-800' : 'hover:bg-blue-700'
-                  }`}
-                >
-                  Download Excel
                 </Link>
               </>
             )}
@@ -192,6 +141,16 @@ export default function Navigation() {
                 </Link>
               </>
             )}
+            {user.role === 'employee' && (
+              <Link
+                href="/dashboard/unified-data"
+                className={`flex items-center px-3 py-2 rounded-md text-sm font-medium ${
+                  isActive('/dashboard/unified-data') ? 'bg-blue-800' : 'hover:bg-blue-700'
+                }`}
+              >
+                Shared data
+              </Link>
+            )}
           </div>
           <div className="flex items-center">
             <div className="flex items-center mr-4">
@@ -199,10 +158,12 @@ export default function Navigation() {
               <span className={`px-2 py-1 text-xs rounded-full font-semibold ${
                 user.role === 'super-admin' ? 'bg-purple-500 text-white' :
                 user.role === 'admin' ? 'bg-green-500 text-white' :
+                user.role === 'employee' ? 'bg-teal-500 text-white' :
                 'bg-gray-500 text-white'
               }`}>
-                {user.role === 'super-admin' ? 'SUPER ADMIN' : 
-                 user.role === 'admin' ? 'ADMIN' : 
+                {user.role === 'super-admin' ? 'SUPER ADMIN' :
+                 user.role === 'admin' ? 'ADMIN' :
+                 user.role === 'employee' ? 'EMPLOYEE' :
                  'USER'}
               </span>
             </div>

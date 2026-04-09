@@ -3,6 +3,7 @@ import connectDB from '@/lib/mongodb';
 import { withAuth, AuthenticatedRequest } from '@/lib/middleware';
 import ExcelFormat from '@/models/ExcelFormat';
 import FormatTemplateData from '@/models/FormatTemplateData';
+import { buildEmployeeTemplatePayload } from '@/lib/formatTemplateRows';
 import mongoose from 'mongoose';
 
 /**
@@ -72,11 +73,12 @@ async function handleGetFormat(
 
     const responseData: any = { ...format };
     if (templateData && templateData.rows) {
-      const allRows = templateData.rows as any[];
-      responseData.templateRowCount = allRows.length;
-      responseData.templateRows = allRows.length > templateLimit
-        ? allRows.slice(0, templateLimit)
-        : allRows;
+      const { templateRows, templateRowCount } = buildEmployeeTemplatePayload(
+        templateData.rows as unknown[],
+        templateLimit
+      );
+      responseData.templateRowCount = templateRowCount;
+      responseData.templateRows = templateRows;
     }
 
     return NextResponse.json({

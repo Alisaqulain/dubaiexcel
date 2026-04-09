@@ -3,6 +3,7 @@ import connectDB from '@/lib/mongodb';
 import { withAuth, AuthenticatedRequest } from '@/lib/middleware';
 import ExcelFormat from '@/models/ExcelFormat';
 import FormatTemplateData from '@/models/FormatTemplateData';
+import { isTemplateRowDeleted } from '@/lib/formatTemplateRows';
 import * as XLSX from 'xlsx';
 import mongoose from 'mongoose';
 
@@ -68,11 +69,12 @@ async function handleDownloadFormatTemplate(
     let dataRows: any[][] = [];
     
     if (templateData && templateData.rows && templateData.rows.length > 0) {
-      // Include all rows with all data (both editable and read-only columns)
-      dataRows = templateData.rows.map((row: Record<string, any>) => {
+      const visibleRows = (templateData.rows as unknown[]).filter((r) => !isTemplateRowDeleted(r));
+      dataRows = visibleRows.map((row) => {
+        const r = row as Record<string, any>;
         return sortedColumns.map((col: any) => {
           // Include all data from template, regardless of editable status
-          return row[col.name] !== undefined && row[col.name] !== null ? String(row[col.name]) : '';
+          return r[col.name] !== undefined && r[col.name] !== null ? String(r[col.name]) : '';
         });
       });
     } else {
