@@ -11,6 +11,55 @@ export const LAST_SAVED_COL = 'Last saved';
 export const ROW_SOURCE_FILE_ID = '_sourceFileId';
 export const MERGE_NOTE_COL = 'Merge note';
 
+/** Normalize for comparing IDs across template vs saved file. */
+function normId(s: string): string {
+  return s.trim().toLowerCase();
+}
+
+/**
+ * Read employee / row id from a sheet row (handles header spelling variants).
+ * Used so admin merge updates the correct template row when pick indices are wrong or missing.
+ */
+export function getEmpIdFromRow(row: Record<string, unknown> | undefined | null): string {
+  if (!row || typeof row !== 'object') return '';
+  for (const [k, v] of Object.entries(row)) {
+    if (k.startsWith('_')) continue;
+    const nk = k
+      .trim()
+      .toLowerCase()
+      // treat punctuation as separators: "EMP. ID", "EMP#"
+      .replace(/[^a-z0-9]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (
+      nk === 'emp id' ||
+      nk === 'employee id' ||
+      nk === 'empid' ||
+      nk === 'emp no' ||
+      nk === 'employee no' ||
+      nk === 'employee number' ||
+      nk === 'emp code' ||
+      nk === 'employee code'
+    ) {
+      return String(v ?? '').trim();
+    }
+  }
+  return '';
+}
+
+function findMergedIndexByEmpId(
+  merged: Record<string, unknown>[],
+  emp: string,
+  skip?: Set<number>
+): number {
+  if (!emp) return -1;
+  const e = normId(emp);
+  return merged.findIndex((m, idx) => {
+    if (skip?.has(idx)) return false;
+    const me = normId(getEmpIdFromRow(m));
+    return me.length > 0 && me === e;
+  });
+}
 
 export type MergeDailyFileRowOptions = {
   /** When false, omit per-row file id (e.g. employee merge JSON). Default true. */
@@ -317,10 +366,16 @@ export function mergeAdminTemplateDailyMerge(
     if (pickPartial && indices) {
       for (let i = 0; i < pairCount; i++) {
         const si = indices[i];
-        const mj = storageToMergedIdx.get(si);
+        const pr = parsed[i];
+        const pe = getEmpIdFromRow(pr);
+        let mj: number | undefined;
+        if (pe) {
+          const jEmp = findMergedIndexByEmpId(merged, pe);
+          if (jEmp >= 0) mj = jEmp;
+        }
+        if (mj === undefined) mj = storageToMergedIdx.get(si);
         if (mj === undefined) continue;
         const target = merged[mj];
-        const pr = parsed[i];
         for (const col of Object.keys(pr)) {
           if (col.startsWith('_')) continue;
           if (tail.includes(col as any)) continue;
@@ -342,6 +397,58 @@ export function mergeAdminTemplateDailyMerge(
         };
         if (idStr) row[ROW_SOURCE_FILE_ID] = idStr;
         appendRows.push(row);
+      }
+    } else if (parsed.length > 0 && merged.length > 0) {
+      /**
+       * No valid pick map (or empty indices): overlay onto template rows.
+       * Prefer matching by EMP ID so row order / stale pick indices cannot leave the wrong template row stale.
+       * Remaining parsed rows fill unused merged slots in order, then append.
+       */
+      const usedMerged = new Set<number>();
+      const overlayOnto = (mj: number, pr: Record<string, unknown>) => {
+        const target = merged[mj];
+        for (const col of Object.keys(pr)) {
+          if (col.startsWith('_')) continue;
+          if (tail.includes(col as any)) continue;
+          if (Object.prototype.hasOwnProperty.call(pr, col)) {
+            target[col] = pr[col];
+          }
+        }
+        target[SUBMITTED_BY_COL] = who;
+        target[SAVED_AT_COL] = displayName;
+        target[LAST_SAVED_COL] = savedAt;
+        if (idStr) target[ROW_SOURCE_FILE_ID] = idStr;
+        usedMerged.add(mj);
+      };
+
+      const unmatched: Record<string, unknown>[] = [];
+      for (const pr of parsed) {
+        const pe = getEmpIdFromRow(pr);
+        if (pe) {
+          const j = findMergedIndexByEmpId(merged, pe, usedMerged);
+          if (j >= 0) {
+            overlayOnto(j, pr);
+            continue;
+          }
+        }
+        unmatched.push(pr);
+      }
+      let scan = 0;
+      for (const pr of unmatched) {
+        while (scan < merged.length && usedMerged.has(scan)) scan++;
+        if (scan < merged.length) {
+          overlayOnto(scan, pr);
+          scan++;
+        } else {
+          const row: Record<string, unknown> = {
+            ...pr,
+            [SUBMITTED_BY_COL]: who,
+            [SAVED_AT_COL]: displayName,
+            [LAST_SAVED_COL]: savedAt,
+          };
+          if (idStr) row[ROW_SOURCE_FILE_ID] = idStr;
+          appendRows.push(row);
+        }
       }
     } else if (parsed.length > 0) {
       for (const r of parsed) {

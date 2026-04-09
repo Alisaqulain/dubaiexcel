@@ -3,6 +3,7 @@ import connectDB from '@/lib/mongodb';
 import { withAdmin, AuthenticatedRequest } from '@/lib/middleware';
 import ExcelFormat from '@/models/ExcelFormat';
 import mongoose from 'mongoose';
+import '@/models/User';
 
 /**
  * GET /api/admin/excel-formats/:id

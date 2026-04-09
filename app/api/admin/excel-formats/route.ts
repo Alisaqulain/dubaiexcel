@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import connectDB from '@/lib/mongodb';
 import { withAdmin, AuthenticatedRequest } from '@/lib/middleware';
 import ExcelFormat from '@/models/ExcelFormat';
+import '@/models/User';
 
 /**
  * GET /api/admin/excel-formats

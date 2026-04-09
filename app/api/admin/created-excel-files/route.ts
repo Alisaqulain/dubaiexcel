@@ -3,6 +3,7 @@ import connectDB from '@/lib/mongodb';
 import { withAdmin, AuthenticatedRequest } from '@/lib/middleware';
 import CreatedExcelFile from '@/models/CreatedExcelFile';
 import Employee from '@/models/Employee';
+import '@/models/User';
 
 /**
  * GET /api/admin/created-excel-files

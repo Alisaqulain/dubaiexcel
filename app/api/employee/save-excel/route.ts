@@ -466,8 +466,12 @@ async function handleSaveExcel(req: AuthenticatedRequest) {
         ? [...existingFile.pickedTemplateRowIndices]
         : [];
       let newPickedIndices: number[] = oldPickedIndices;
-      if (updateFormatId) {
+      if (updateFormatId && mongoose.Types.ObjectId.isValid(updateFormatId)) {
         existingFile.formatId = new mongoose.Types.ObjectId(updateFormatId);
+      } else if (!existingFile.formatId) {
+        // Ensure files saved through this flow stay linked to the assigned format,
+        // so admin daily merge works even if the client forgot to send formatId on PUT.
+        existingFile.formatId = new mongoose.Types.ObjectId((assignedFormat as any)._id);
       }
       if (updateRowIndicesRaw) {
         try {
@@ -479,6 +483,10 @@ async function handleSaveExcel(req: AuthenticatedRequest) {
         } catch {
           // keep existing
         }
+      } else if (pickRowIndices.length > 0 && oldPickedIndices.length === 0) {
+        // Same idea: keep indices for admin overlay merge when client doesn't send rowIndices on PUT.
+        existingFile.pickedTemplateRowIndices = pickRowIndices;
+        newPickedIndices = pickRowIndices;
       }
       await existingFile.save();
 
@@ -696,6 +704,9 @@ async function handleSaveExcel(req: AuthenticatedRequest) {
         createdByEmail: userEmail,
       };
       const assignedFormatIdStr = (assignedFormat as any)._id.toString();
+      // This endpoint validates against assigned format, so always link the saved file to that format.
+      // That is required for the admin `/admin/all-merge-data` view to find and merge saves by format+date.
+      createPayload.formatId = new mongoose.Types.ObjectId((assignedFormat as any)._id);
       if (isPickSave && pickFormatId && pickRowIndices.length > 0) {
         createPayload.formatId = new mongoose.Types.ObjectId(pickFormatId);
         createPayload.pickedTemplateRowIndices = pickRowIndices;
@@ -707,9 +718,9 @@ async function handleSaveExcel(req: AuthenticatedRequest) {
           linkFormatId === assignedFormatIdStr
         ) {
           createPayload.formatId = new mongoose.Types.ObjectId(linkFormatId);
-          if (pickRowIndices.length > 0) {
-            createPayload.pickedTemplateRowIndices = pickRowIndices;
-          }
+        }
+        if (pickRowIndices.length > 0) {
+          createPayload.pickedTemplateRowIndices = pickRowIndices;
         }
       }
       const createdFile = await CreatedExcelFile.create(createPayload);

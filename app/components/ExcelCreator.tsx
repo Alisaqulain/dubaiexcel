@@ -940,9 +940,10 @@ export default function ExcelCreator({
     formData.append('file', file);
     formData.append('labourType', labourType);
     formData.append('rowCount', rows.length.toString());
-    appendFormatPickMetaToFormData(formData, putFileId, {
-      omitRowIndices: !!myDataDailySave,
-    });
+    // Always attach rowIndices when we can derive them (pick / template-linked rows).
+    // "My data" daily save used to omit them, which broke admin merge overlay — server merge now also
+    // falls back to positional overlay, but sending indices when known is still best.
+    appendFormatPickMetaToFormData(formData, putFileId);
 
     const response = await fetch('/api/employee/save-excel', {
       method,
