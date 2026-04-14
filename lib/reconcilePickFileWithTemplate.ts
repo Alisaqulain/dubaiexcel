@@ -100,15 +100,17 @@ export function reconcilePickFileWithTemplate(
 }
 
 /**
- * Overlay current master template values onto each pick-file row (same column set as format).
- * Fixes stale cells when admin updated the template but the saved XLSX was not yet rewritten.
+ * Overlay master template values only for locked (non-editable) columns.
+ * Editable columns keep the employee's saved values; otherwise reopening the file would
+ * wipe edits whenever the template still differed from the pick file.
  */
 export function mergePickFileRowsFromTemplate(
   fileRows: Record<string, unknown>[],
   templateIndices: number[],
   templateRows: unknown[],
-  formatColumnNames: string[]
+  formatColumns: FormatCol[]
 ): { rows: Record<string, unknown>[]; changed: boolean } {
+  const formatColumnNames = formatColumns.map((c) => c.name.trim()).filter(Boolean);
   let anyChanged = false;
   const rows = fileRows.map((fr, i) => {
     const t = templateIndices[i];
@@ -120,6 +122,8 @@ export function mergePickFileRowsFromTemplate(
     for (const col of formatColumnNames) {
       if (!col || col.startsWith('__')) continue;
       if (!Object.prototype.hasOwnProperty.call(tr, col)) continue;
+      const colDef = formatColumns.find((c) => c.name.trim() === col);
+      if (colDef?.editable !== false) continue;
       const nv = tr[col];
       if (normalizeCell(next[col]) !== normalizeCell(nv)) {
         rowChanged = true;

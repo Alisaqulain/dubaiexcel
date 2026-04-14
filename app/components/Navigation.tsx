@@ -141,16 +141,6 @@ export default function Navigation() {
                 </Link>
               </>
             )}
-            {user.role === 'employee' && (
-              <Link
-                href="/dashboard/unified-data"
-                className={`flex items-center px-3 py-2 rounded-md text-sm font-medium ${
-                  isActive('/dashboard/unified-data') ? 'bg-blue-800' : 'hover:bg-blue-700'
-                }`}
-              >
-                Shared data
-              </Link>
-            )}
           </div>
           <div className="flex items-center">
             <div className="flex items-center mr-4">

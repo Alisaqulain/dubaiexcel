@@ -3,7 +3,10 @@ import connectDB from '@/lib/mongodb';
 import { withAuth, AuthenticatedRequest } from '@/lib/middleware';
 import ExcelFormat from '@/models/ExcelFormat';
 import FormatTemplateData from '@/models/FormatTemplateData';
-import { buildEmployeeTemplatePayload } from '@/lib/formatTemplateRows';
+import {
+  buildEmployeeTemplatePayload,
+  getTemplateRowsByOriginalIndices,
+} from '@/lib/formatTemplateRows';
 import mongoose from 'mongoose';
 
 /**
@@ -12,7 +15,8 @@ import mongoose from 'mongoose';
  */
 async function handleGetFormat(
   req: AuthenticatedRequest,
-  context: { params: Promise<{ id: string }> | { id: string } }
+  context: { params: Promise<{ id: string }> | { id: string } },
+  searchParams: URLSearchParams
 ) {
   try {
     await connectDB();
@@ -73,12 +77,25 @@ async function handleGetFormat(
 
     const responseData: any = { ...format };
     if (templateData && templateData.rows) {
-      const { templateRows, templateRowCount } = buildEmployeeTemplatePayload(
-        templateData.rows as unknown[],
-        templateLimit
-      );
+      const rowsRaw = templateData.rows as unknown[];
+      const { templateRows, templateRowCount } = buildEmployeeTemplatePayload(rowsRaw, templateLimit);
       responseData.templateRowCount = templateRowCount;
       responseData.templateRows = templateRows;
+
+      const idxRaw = searchParams.get('templateRowIndices');
+      if (idxRaw) {
+        const parsed = Array.from(
+          new Set(
+            idxRaw
+              .split(/[,\s]+/)
+              .map((s) => parseInt(s.trim(), 10))
+              .filter((n) => !isNaN(n) && n >= 0 && Number.isInteger(n))
+          )
+        ).slice(0, 400);
+        if (parsed.length > 0) {
+          responseData.templateRowsByIndex = getTemplateRowsByOriginalIndices(rowsRaw, parsed);
+        }
+      }
     }
 
     return NextResponse.json({
@@ -98,8 +115,9 @@ export async function GET(
   req: NextRequest,
   context: { params: Promise<{ id: string }> | { id: string } }
 ) {
+  const sp = req.nextUrl.searchParams;
   const handler = withAuth(async (authReq: AuthenticatedRequest) => {
-    return handleGetFormat(authReq, context);
+    return handleGetFormat(authReq, context, sp);
   });
   return handler(req);
 }

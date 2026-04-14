@@ -3,19 +3,6 @@
 import { useEffect, useState, useMemo } from 'react';
 import { useAuth } from '../context/AuthContext';
 import ExcelCreator from './ExcelCreator';
-import { highlightAllSearchMatches } from './HighlightSearch';
-import { useDebounce, SEARCH_DEBOUNCE_MS } from '@/lib/useDebounce';
-
-function getColumnLetter(index: number): string {
-  let s = '';
-  let n = index;
-  while (n >= 0) {
-    s = String.fromCharCode(65 + (n % 26)) + s;
-    n = Math.floor(n / 26) - 1;
-  }
-  return s;
-}
-
 
 interface CreatedFile {
   _id: string;
@@ -24,6 +11,7 @@ interface CreatedFile {
   rowCount: number;
   formatId?: string;
   pickedTemplateRowIndices?: number[];
+  dailyWorkDate?: string;
   createdAt: string;
   updatedAt?: string;
   lastEditedAt?: string;
@@ -41,6 +29,29 @@ function fileLocalYmd(f: Pick<CreatedFile, 'lastEditedAt' | 'updatedAt' | 'creat
   const d = new Date(raw);
   const p = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+/** Day-stamped work file from Save Excel (e.g. FormatName_2026-04-13.xlsx) — not a row-pick snapshot */
+function isDailyWorkFilename(name: string | undefined): boolean {
+  if (!name) return false;
+  return /_[0-9]{4}-[0-9]{2}-[0-9]{2}\.xlsx$/i.test(name.trim());
+}
+
+function dayStampFromDailyFilename(name: string | undefined): string | null {
+  if (!name) return null;
+  const m = name.trim().match(/_([0-9]{4}-[0-9]{2}-[0-9]{2})\.xlsx$/i);
+  return m ? m[1] : null;
+}
+
+function hasPickRowIndices(f: CreatedFile): boolean {
+  return !!(f.formatId && Array.isArray(f.pickedTemplateRowIndices) && f.pickedTemplateRowIndices.length > 0);
+}
+
+/** Same calendar day as “today’s” save (dailyWorkDate, filename stamp, or last-edit date). */
+function isFileForLocalCalendarDay(f: CreatedFile, ymd: string): boolean {
+  if (f.dailyWorkDate === ymd) return true;
+  if (dayStampFromDailyFilename(f.originalFilename) === ymd) return true;
+  return fileLocalYmd(f) === ymd;
 }
 
 interface ExcelFormat {
@@ -74,20 +85,10 @@ export default function EmployeeDashboard() {
   const [editingFileId, setEditingFileId] = useState<string | null>(null);
   const [editingFileName, setEditingFileName] = useState<string | null>(null);
   const [editingFilePickedIndices, setEditingFilePickedIndices] = useState<number[] | undefined>(undefined);
-  const [viewingFileId, setViewingFileId] = useState<string | null>(null);
   const [fileData, setFileData] = useState<any[]>([]);
-  const [filesListSearch, setFilesListSearch] = useState('');
-  const [viewDataSearch, setViewDataSearch] = useState('');
+  /** Work with this: rows already = template + all day saves (server); skip client re-merge in ExcelCreator */
+  const [pickWorkspacePremerged, setPickWorkspacePremerged] = useState(false);
   const [activeTab, setActiveTab] = useState<'formats' | 'mydata'>('formats');
-  const debouncedFilesListSearch = useDebounce(filesListSearch, SEARCH_DEBOUNCE_MS);
-  const debouncedViewDataSearch = useDebounce(viewDataSearch, SEARCH_DEBOUNCE_MS);
-
-  const [workspaceFormatId, setWorkspaceFormatId] = useState('');
-
-  useEffect(() => {
-    if (formats.length === 0) return;
-    setWorkspaceFormatId((id) => id || formats[0]._id);
-  }, [formats]);
 
   useEffect(() => {
     fetchMyFormats();
@@ -113,9 +114,9 @@ export default function EmployeeDashboard() {
     }
   };
 
-  const fetchMyCreatedFiles = async () => {
+  const fetchMyCreatedFiles = async (opts?: { silent?: boolean }): Promise<CreatedFile[]> => {
     try {
-      setLoadingCreatedFiles(true);
+      if (!opts?.silent) setLoadingCreatedFiles(true);
       const authToken = token ?? (typeof window !== 'undefined' ? localStorage.getItem('token') : null);
       const response = await fetch('/api/employee/created-excel-files', {
         cache: 'no-store',
@@ -125,57 +126,64 @@ export default function EmployeeDashboard() {
       });
       const result = await response.json();
       if (result.success) {
-        setMyCreatedFiles(result.data || []);
+        const list = (result.data || []) as CreatedFile[];
+        setMyCreatedFiles(list);
+        return list;
       }
     } catch (err: any) {
       console.error('Failed to fetch created files:', err);
     } finally {
-      setLoadingCreatedFiles(false);
+      if (!opts?.silent) setLoadingCreatedFiles(false);
     }
+    return [];
   };
 
-  const handleViewFile = async (fileId: string) => {
-    try {
-      const token = localStorage.getItem('token');
-      const response = await fetch(`/api/employee/created-excel-files/${fileId}`, {
-        cache: 'no-store',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
-      });
-      const result = await response.json();
-      if (result.success) {
-        setFileData(result.data.data);
-        setViewingFileId(fileId);
-        setViewDataSearch('');
-      } else {
-        setMessage({ type: 'error', text: result.error || 'Failed to load file' });
-      }
-    } catch (err: any) {
-      setMessage({ type: 'error', text: err.message || 'Failed to load file' });
+  /** Row-pick snapshots only (exclude day files even if DB once stored template indices on them) */
+  const pickSavedFiles = useMemo(() => {
+    const picks = myCreatedFiles.filter(
+      (f) => hasPickRowIndices(f) && !isDailyWorkFilename(f.originalFilename)
+    );
+    const byKey = new Map<string, CreatedFile>();
+    for (const f of picks) {
+      const key = `${f.formatId}:${JSON.stringify([...(f.pickedTemplateRowIndices || [])].sort((a, b) => a - b))}`;
+      const prev = byKey.get(key);
+      const tNew = new Date(f.updatedAt || f.lastEditedAt || f.createdAt).getTime();
+      const tPrev = prev ? new Date(prev.updatedAt || prev.lastEditedAt || prev.createdAt).getTime() : -1;
+      if (!prev || tNew >= tPrev) byKey.set(key, f);
     }
-  };
-
-  const pickSavedFiles = useMemo(() =>
-    myCreatedFiles.filter((f) => f.formatId && Array.isArray(f.pickedTemplateRowIndices) && f.pickedTemplateRowIndices.length > 0),
-    [myCreatedFiles]
-  );
-  const savedFilesOnly = useMemo(() =>
-    myCreatedFiles.filter((f) => !(f.formatId && Array.isArray(f.pickedTemplateRowIndices) && f.pickedTemplateRowIndices.length > 0)),
-    [myCreatedFiles]
-  );
-
-  /** Non-pick files for this format: daily saves from My data (appear in Saved files). */
+    return Array.from(byKey.values()).sort(
+      (a, b) =>
+        new Date(b.updatedAt || b.lastEditedAt || b.createdAt).getTime() -
+        new Date(a.updatedAt || a.lastEditedAt || a.createdAt).getTime()
+    );
+  }, [myCreatedFiles]);
+  /** Non-pick files for this format: daily saves from My data (appear in Saved files). One row per format+day. */
   const myDataSavedFiles = useMemo(() => {
-    return myCreatedFiles.filter(
-      (f) =>
-        f.formatId &&
-        !(Array.isArray(f.pickedTemplateRowIndices) && f.pickedTemplateRowIndices.length > 0)
+    const candidates = myCreatedFiles.filter((f) => {
+      if (hasPickRowIndices(f) && !isDailyWorkFilename(f.originalFilename)) return false;
+      if (!f.formatId && !isDailyWorkFilename(f.originalFilename)) return false;
+      return true;
+    });
+    const byKey = new Map<string, CreatedFile>();
+    for (const f of candidates) {
+      const dayKey =
+        f.dailyWorkDate || dayStampFromDailyFilename(f.originalFilename) || fileLocalYmd(f);
+      const fmt = f.formatId || '_';
+      const key = `${fmt}:${dayKey}`;
+      const prev = byKey.get(key);
+      const tNew = new Date(f.updatedAt || f.lastEditedAt || f.createdAt).getTime();
+      const tPrev = prev ? new Date(prev.updatedAt || prev.lastEditedAt || prev.createdAt).getTime() : -1;
+      if (!prev || tNew >= tPrev) byKey.set(key, f);
+    }
+    return Array.from(byKey.values()).sort(
+      (a, b) =>
+        new Date(b.updatedAt || b.lastEditedAt || b.createdAt).getTime() -
+        new Date(a.updatedAt || a.lastEditedAt || a.createdAt).getTime()
     );
   }, [myCreatedFiles]);
 
   const myDataDailySave = useMemo(() => {
-    if (activeTab !== 'mydata' || !showExcelCreator || !selectedFormat) return null;
+    if (!showExcelCreator || !selectedFormat) return null;
     const fmtId = selectedFormat._id;
     const ymd = todayLocalYmd();
     const slug =
@@ -188,11 +196,11 @@ export default function EmployeeDashboard() {
     const nonPickSameFormat = myCreatedFiles.filter(
       (f) =>
         f.formatId === fmtId &&
-        !(Array.isArray(f.pickedTemplateRowIndices) && f.pickedTemplateRowIndices.length > 0)
+        (!hasPickRowIndices(f) || isDailyWorkFilename(f.originalFilename))
     );
 
     const newestForDay = (list: CreatedFile[]) => {
-      const onDay = list.filter((f) => fileLocalYmd(f) === ymd);
+      const onDay = list.filter((f) => isFileForLocalCalendarDay(f, ymd));
       onDay.sort(
         (a, b) =>
           new Date(b.updatedAt || b.lastEditedAt || b.createdAt).getTime() -
@@ -212,53 +220,62 @@ export default function EmployeeDashboard() {
       putTargetId = newestForDay(nonPickSameFormat);
     } else if (editingFileId) {
       const cur = myCreatedFiles.find((f) => f._id === editingFileId);
-      const isPick =
-        !!cur &&
-        Array.isArray(cur.pickedTemplateRowIndices) &&
-        cur.pickedTemplateRowIndices.length > 0;
+      const isPick = !!cur && hasPickRowIndices(cur) && !isDailyWorkFilename(cur.originalFilename);
       if (cur && !isPick) {
-        putTargetId = fileLocalYmd(cur) === ymd ? editingFileId : null;
+        putTargetId = isFileForLocalCalendarDay(cur, ymd) ? editingFileId : null;
       } else if (cur && isPick) {
         putTargetId = newestForDay(nonPickSameFormat);
+      } else if (!cur) {
+        // List not refreshed yet after first save today — still PUT this file
+        putTargetId = editingFileId;
       }
     }
 
-    return { putTargetId, defaultFilename };
-  }, [
-    activeTab,
-    showExcelCreator,
-    selectedFormat,
-    editingFileId,
-    editingFilePickedIndices,
-    myCreatedFiles,
-  ]);
+    return { putTargetId, defaultFilename, dailyWorkYmd: ymd };
+  }, [showExcelCreator, selectedFormat, editingFileId, editingFilePickedIndices, myCreatedFiles]);
 
   const handleWorkWithPickFile = async (file: CreatedFile) => {
     try {
-      const token = localStorage.getItem('token');
-      const [fileRes, formatFromList] = await Promise.all([
-        fetch(`/api/employee/created-excel-files/${file._id}`, { cache: 'no-store', headers: { Authorization: `Bearer ${token}` } }),
-        Promise.resolve(formats.find((f) => f._id === file.formatId)),
+      const authToken = token ?? (typeof window !== 'undefined' ? localStorage.getItem('token') : null);
+
+      const [wkRes] = await Promise.all([
+        fetch(
+          `/api/employee/pick-workspace-data?pickFileId=${encodeURIComponent(file._id)}`,
+          {
+            cache: 'no-store',
+            headers: { Authorization: `Bearer ${authToken ?? ''}` },
+          }
+        ),
+        fetchMyCreatedFiles({ silent: true }),
       ]);
-      const fileResult = await fileRes.json();
-      if (!fileResult.success) {
-        setMessage({ type: 'error', text: fileResult.error || 'Failed to load file' });
+
+      const wk = await wkRes.json();
+      if (!wk.success || !Array.isArray(wk.data?.rows)) {
+        setMessage({ type: 'error', text: wk.error || 'Failed to load workspace' });
         return;
       }
-      let format = formatFromList ?? null;
-      if (!format && file.formatId && token) {
-        const formatRes = await fetch(`/api/employee/excel-formats/${file.formatId}`, { headers: { Authorization: `Bearer ${token}` } });
+
+      const fmtId = wk.data.formatId || file.formatId;
+      let format = formats.find((f) => f._id === fmtId) ?? null;
+      if (!format && fmtId && authToken) {
+        const formatRes = await fetch(`/api/employee/excel-formats/${fmtId}`, {
+          headers: { Authorization: `Bearer ${authToken}` },
+        });
         const formatJson = await formatRes.json();
         if (formatJson.success && formatJson.data) format = formatJson.data;
       }
-      setFileData(fileResult.data.data);
-      setEditingFileId(file._id);
-      setEditingFileName(file.originalFilename || null);
-      setEditingFilePickedIndices(Array.isArray(fileResult.data.pickedTemplateRowIndices) ? fileResult.data.pickedTemplateRowIndices : undefined);
-      setViewingFileId(null);
+
+      setFileData(wk.data.rows);
+      setEditingFileId(wk.data.editingFileId);
+      setEditingFileName(wk.data.editingFilename || null);
+      setEditingFilePickedIndices(
+        Array.isArray(wk.data.pickedTemplateRowIndices) ? wk.data.pickedTemplateRowIndices : undefined
+      );
       setSelectedFormat(format || formats[0] || null);
+      setPickWorkspacePremerged(true);
       setShowExcelCreator(true);
       setMessage(null);
+      setActiveTab('mydata');
     } catch (err: any) {
       setMessage({ type: 'error', text: err.message || 'Failed to load file' });
     }
@@ -275,11 +292,11 @@ export default function EmployeeDashboard() {
       });
       const result = await response.json();
       if (result.success) {
+        setPickWorkspacePremerged(false);
         setFileData(result.data.data);
         setEditingFileId(fileId);
         setEditingFileName(file?.originalFilename || result.data?.filename || null);
         setEditingFilePickedIndices(Array.isArray(result.data?.pickedTemplateRowIndices) ? result.data.pickedTemplateRowIndices : undefined);
-        setViewingFileId(null);
         const formatId = file?.formatId || result.data?.formatId;
         if (formatId && formats.length > 0) {
           const match = formats.find((f) => f._id === formatId);
@@ -288,6 +305,7 @@ export default function EmployeeDashboard() {
           setSelectedFormat(formats[0]);
         }
         setShowExcelCreator(true);
+        setActiveTab('mydata');
       } else {
         setMessage({ type: 'error', text: result.error || 'Failed to load file for editing' });
       }
@@ -325,6 +343,18 @@ export default function EmployeeDashboard() {
     }
   };
 
+  const openFormatWorkspace = (format: ExcelFormat) => {
+    setSelectedFormat(format);
+    setEditingFileId(null);
+    setEditingFileName(null);
+    setEditingFilePickedIndices(undefined);
+    setFileData([]);
+    setPickWorkspacePremerged(false);
+    setShowExcelCreator(true);
+    setMessage(null);
+    setActiveTab('formats');
+  };
+
   return (
     <div className="min-h-screen bg-gray-50 p-6">
       <div className="max-w-7xl mx-auto">
@@ -332,7 +362,9 @@ export default function EmployeeDashboard() {
         
         <div className="bg-white rounded-lg shadow p-6 mb-6">
           <h2 className="text-xl font-semibold mb-4">Welcome, {user?.name || (user as any)?.empId || 'Employee'}</h2>
-          <p className="text-gray-600 mb-4">Create and save your Excel files here. All saved files will be visible to administrators.</p>
+          <p className="text-gray-600 mb-4">
+            Use <strong>Formats</strong> to open the admin-uploaded sheet, pick rows, and save your pick. Use <strong>My data</strong> to open those picks, edit, and see day-stamped saves.
+          </p>
           <div className="flex gap-1 border-b border-gray-200">
             <button
               type="button"
@@ -378,16 +410,16 @@ export default function EmployeeDashboard() {
         <div className="bg-white rounded-lg shadow p-6 mb-6">
           <h2 className="text-xl font-semibold mb-4">My Assigned Excel Formats</h2>
           <div className="mb-4 p-4 bg-blue-50 rounded-lg border border-blue-200">
-            <h3 className="font-semibold text-blue-900 mb-2">📋 Your Assigned Formats</h3>
+            <h3 className="font-semibold text-blue-900 mb-2">📋 Admin data &amp; picking</h3>
             <p className="text-sm text-blue-700 mb-2">
-              You can only use formats assigned to you. Download templates here. To <strong>pick rows and save</strong>, use the{' '}
+              Each card is a format your admin uploaded. Open the live sheet here, use the <strong>Pick</strong> column, then <strong>Save my pick</strong>. Your pick appears under the{' '}
               <button type="button" onClick={() => setActiveTab('mydata')} className="text-blue-900 font-semibold underline">
                 My data
               </button>{' '}
-              tab.
+              tab; daily edits after <strong>Work with this</strong> show there too.
             </p>
             <p className="text-xs text-blue-600">
-              All Excel files must match your assigned format exactly. Files that don&apos;t match will be rejected.
+              Files must match your assigned format. Invalid uploads are rejected.
             </p>
           </div>
           
@@ -427,11 +459,15 @@ export default function EmployeeDashboard() {
                   </div>
                   
                   <div className="space-y-2">
-                    {/* Primary "create from format" path disabled — use My data → open workspace to pick rows */}
-                    <div className="w-full px-4 py-3 rounded-md text-sm bg-gray-100 text-gray-700 border border-gray-200 text-center">
-                      Pick &amp; save is opened from <button type="button" onClick={() => setActiveTab('mydata')} className="text-emerald-700 font-semibold underline">My data</button>.
-                    </div>
                     <button
+                      type="button"
+                      onClick={() => openFormatWorkspace(format)}
+                      className="w-full px-4 py-3 bg-blue-600 text-white rounded-md hover:bg-blue-700 text-sm font-medium flex items-center justify-center gap-2"
+                    >
+                      Open admin data — pick &amp; save
+                    </button>
+                    <button
+                      type="button"
                       onClick={() => handleDownloadTemplate(format._id, format.name)}
                       className="w-full px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 text-sm font-medium flex items-center justify-center gap-2"
                     >
@@ -505,90 +541,14 @@ export default function EmployeeDashboard() {
               </div>
               {pickSavedFiles.length > 0 && (
                 <p className="text-sm text-gray-500 mt-4">
-                  Your saved picks from the main Excel are in the <button type="button" onClick={() => setActiveTab('mydata')} className="text-emerald-600 hover:underline font-medium">My data tab</button> ({pickSavedFiles.length} file{pickSavedFiles.length !== 1 ? 's' : ''}).
+                  You have <strong>{pickSavedFiles.length}</strong> saved pick{pickSavedFiles.length !== 1 ? 's' : ''} — open the{' '}
+                  <button type="button" onClick={() => setActiveTab('mydata')} className="text-emerald-600 hover:underline font-medium">
+                    My data
+                  </button>{' '}
+                  tab to work with them or see day files.
                 </p>
               )}
             </div>
-          )}
-        </div>
-
-        {/* My Created Files Section */}
-        <div className="bg-white rounded-lg shadow p-6 mb-6">
-          <h2 className="text-xl font-semibold mb-4">My Saved Excel Files</h2>
-          {loadingCreatedFiles ? (
-            <div className="text-center py-8">Loading...</div>
-          ) : savedFilesOnly.length === 0 ? (
-            <div className="text-center py-8 text-gray-500">
-              No saved files yet that are not &quot;picks&quot;. Pick saves use <strong>My data</strong>; other uploads may appear here when your workflow uses them.
-            </div>
-          ) : (
-            <>
-              <div className="mb-4 flex flex-wrap items-center gap-3">
-                <label className="text-sm font-medium text-gray-700">Search:</label>
-                <input
-                  type="text"
-                  value={filesListSearch}
-                  onChange={(e) => setFilesListSearch(e.target.value)}
-                  placeholder="Search filename, labour type..."
-                  className="px-3 py-2 border border-gray-300 rounded-md text-sm w-64 focus:ring-1 focus:ring-blue-500"
-                />
-                {filesListSearch && (
-                  <button type="button" onClick={() => setFilesListSearch('')} className="px-2 py-1.5 text-sm bg-gray-200 rounded hover:bg-gray-300">Clear</button>
-                )}
-                <span className="text-xs text-gray-500">
-                  {(debouncedFilesListSearch.trim() ? savedFilesOnly.filter((f) => (f.originalFilename || '').toLowerCase().includes(debouncedFilesListSearch.trim().toLowerCase()) || (f.labourType || '').toLowerCase().includes(debouncedFilesListSearch.trim().toLowerCase())).length : savedFilesOnly.length)} of {savedFilesOnly.length} file(s)
-                </span>
-              </div>
-              <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-gray-200">
-                <thead className="bg-gray-50">
-                  <tr>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Filename</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Labour Type</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Rows</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Created</th>
-                    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="bg-white divide-y divide-gray-200">
-                  {(debouncedFilesListSearch.trim() ? savedFilesOnly.filter((f) => (f.originalFilename || '').toLowerCase().includes(debouncedFilesListSearch.trim().toLowerCase()) || (f.labourType || '').toLowerCase().includes(debouncedFilesListSearch.trim().toLowerCase())) : savedFilesOnly).map((file) => (
-                    <tr key={file._id} className="hover:bg-gray-50">
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{highlightAllSearchMatches(file.originalFilename, debouncedFilesListSearch)}</td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                        <span className={`px-2 py-1 text-xs rounded-full ${
-                          file.labourType === 'OUR_LABOUR' ? 'bg-blue-100 text-blue-800' :
-                          file.labourType === 'SUPPLY_LABOUR' ? 'bg-green-100 text-green-800' :
-                          'bg-purple-100 text-purple-800'
-                        }`}>
-                          {highlightAllSearchMatches(file.labourType.replace('_', ' '), debouncedFilesListSearch)}
-                        </span>
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{file.rowCount}</td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                        {new Date(file.createdAt).toLocaleString()}
-                      </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                        <div className="flex gap-2">
-                          <button
-                            onClick={() => handleViewFile(file._id)}
-                            className="text-blue-600 hover:text-blue-900"
-                          >
-                            Show
-                          </button>
-                          <button
-                            onClick={() => handleEditFile(file._id, file)}
-                            className="text-green-600 hover:text-green-900"
-                          >
-                            Edit
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            </>
           )}
         </div>
 
@@ -601,54 +561,21 @@ export default function EmployeeDashboard() {
         <div className="bg-white rounded-lg shadow p-6 mb-6">
           <h2 className="text-xl font-semibold mb-2">My picks</h2>
           <p className="text-gray-600 mb-6">
-            Files from <strong>Save my pick</strong>. Open <strong>Work with this</strong>, edit cells, then <strong>Save Excel</strong> — a popup uses today&apos;s date in the name. The same day always updates one file; a new day creates a new file. Those day files appear below under Saved files.
+            Files from <strong>Save my pick</strong> (auto-named). <strong>Work with this</strong> loads the <strong>admin master</strong> for your picked rows, then applies every <strong>Save Excel</strong> from your day files in order — <strong>latest save wins</strong> for each cell in columns marked <strong>editable</strong> in the format; all other columns stay master/HR data. Edit, then <strong>Save Excel</strong> (one file per calendar day). Day files also appear under Saved files below.
           </p>
           {loadingCreatedFiles ? (
             <div className="text-center py-12 text-gray-500">Loading...</div>
           ) : pickSavedFiles.length === 0 ? (
             <div className="text-center py-12 text-gray-500 rounded-lg border-2 border-dashed border-gray-200 bg-gray-50 px-4">
-              <p className="mb-4">No saved pick files yet.</p>
+              <p className="mb-3">No saved pick files yet.</p>
               {formats.length > 0 ? (
-                <div className="max-w-md mx-auto text-left space-y-3">
-                  <p className="text-sm text-gray-600">
-                    Open the format workspace here, pick rows in the main grid, then use <strong>Save my pick</strong> (default filename includes date and time).
-                  </p>
-                  <div className="flex flex-col sm:flex-row gap-2 items-stretch sm:items-end">
-                    <div className="flex-1">
-                      <label className="block text-xs font-medium text-gray-600 mb-1">Format</label>
-                      <select
-                        value={workspaceFormatId}
-                        onChange={(e) => setWorkspaceFormatId(e.target.value)}
-                        className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
-                      >
-                        {formats.map((f) => (
-                          <option key={f._id} value={f._id}>
-                            {f.name}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const f = formats.find((x) => x._id === workspaceFormatId) || formats[0];
-                        if (!f) return;
-                        setSelectedFormat(f);
-                        setEditingFileId(null);
-                        setEditingFileName(null);
-                        setEditingFilePickedIndices(undefined);
-                        setFileData([]);
-                        setViewingFileId(null);
-                        setShowExcelCreator(true);
-                        setMessage(null);
-                        setActiveTab('mydata');
-                      }}
-                      className="px-4 py-2 bg-blue-600 text-white rounded-md text-sm font-medium hover:bg-blue-700 whitespace-nowrap"
-                    >
-                      Open workspace — pick &amp; save
-                    </button>
-                  </div>
-                </div>
+                <p className="text-sm text-gray-600 max-w-lg mx-auto">
+                  Go to the{' '}
+                  <button type="button" onClick={() => setActiveTab('formats')} className="text-emerald-700 font-semibold underline">
+                    Formats
+                  </button>{' '}
+                  tab, choose your format, and click <strong>Open admin data — pick &amp; save</strong>. Pick rows, then <strong>Save my pick</strong>. Your pick will show here.
+                </p>
               ) : (
                 <p className="text-sm">No formats assigned. Contact your administrator.</p>
               )}
@@ -685,13 +612,13 @@ export default function EmployeeDashboard() {
         <div className="bg-white rounded-lg shadow p-6 mb-6">
           <h2 className="text-xl font-semibold mb-2">Saved files (by day)</h2>
           <p className="text-gray-600 text-sm mb-4">
-            Day-stamped saves from My picks (after you use Save Excel). Edit keeps updating today&apos;s file; tomorrow opens a new one automatically.
+            Day-stamped files after you <strong>Work with this</strong> on a pick and use <strong>Save Excel</strong>. Same day updates one file; a new day creates a new file.
           </p>
           {loadingCreatedFiles ? (
             <div className="text-center py-8 text-gray-500">Loading...</div>
           ) : myDataSavedFiles.length === 0 ? (
             <p className="text-center py-8 text-gray-500 border-2 border-dashed border-gray-200 rounded-lg bg-gray-50 text-sm">
-              No day-saved files yet. Work with a pick above, edit, then Save Excel.
+              No day-saved files yet. Open a pick above with <strong>Work with this</strong>, edit, then <strong>Save Excel</strong>.
             </p>
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -740,8 +667,7 @@ export default function EmployeeDashboard() {
                 </p>
                 {!editingFileId && (
                   <p className="text-xs text-amber-800 bg-amber-50 border border-amber-100 rounded px-2 py-1.5 mt-2 max-w-3xl">
-                    This screen is the <strong>live admin template</strong> (pick / new saves). To change a file you already saved, open it from the{' '}
-                    <strong>My data</strong> tab and save there — those edits stay in your saved file.
+                    This is the <strong>admin-uploaded sheet</strong> (pick rows, then Save my pick). Files you already saved are opened from the <strong>My data</strong> tab.
                   </p>
                 )}
               </div>
@@ -753,7 +679,7 @@ export default function EmployeeDashboard() {
                   setEditingFileName(null);
                   setEditingFilePickedIndices(undefined);
                   setFileData([]);
-                  setViewingFileId(null);
+                  setPickWorkspacePremerged(false);
                 }}
                 className="px-4 py-2 text-gray-600 hover:text-gray-800 border border-gray-300 rounded-md"
               >
@@ -767,6 +693,7 @@ export default function EmployeeDashboard() {
               formatId={selectedFormat._id}
               editingFileId={editingFileId || undefined}
               initialData={fileData.length > 0 ? fileData : undefined}
+              workspaceDataPremerged={pickWorkspacePremerged}
               myDataDailySave={myDataDailySave}
               onMyDataDailyFileSaved={(id, filename) => {
                 setEditingFileId(id);
@@ -777,11 +704,10 @@ export default function EmployeeDashboard() {
                 setCreatedFile(file);
               }}
               onSaveSuccess={async () => {
-                await fetchMyCreatedFiles();
+                await fetchMyCreatedFiles({ silent: true });
                 setMessage({
                   type: 'success',
-                  text:
-                    'List updated. Check Formats → My Saved Excel Files for normal saves, or My data for “Save my pick” files.',
+                  text: 'List updated. Picks and day files are under the My data tab.',
                 });
               }}
               onSaveAndClose={() => {
@@ -795,14 +721,14 @@ export default function EmployeeDashboard() {
                 setEditingFileName(null);
                 setEditingFilePickedIndices(undefined);
                 setFileData([]);
-                setViewingFileId(null);
-                setActiveTab(fileIsPickWorkflow ? 'mydata' : 'formats');
-                void fetchMyCreatedFiles();
+                setPickWorkspacePremerged(false);
+                setActiveTab('mydata');
+                void fetchMyCreatedFiles({ silent: true });
                 setMessage({
                   type: 'success',
                   text: fileIsPickWorkflow
-                    ? 'Workspace closed. Your pick file is under the My data tab.'
-                    : 'Workspace closed. Your file is under Formats → My Saved Excel Files (newest first).',
+                    ? 'Workspace closed. Your pick is under My data.'
+                    : 'Workspace closed. Your files are under My data.',
                 });
               }}
               editingFileName={editingFileName || undefined}
@@ -810,81 +736,6 @@ export default function EmployeeDashboard() {
             />
           </div>
         )}
-
-        {/* View File Modal - Excel-style view with search and yellow highlight */}
-        {viewingFileId && fileData.length > 0 && (() => {
-          const columns = Object.keys(fileData[0] || {});
-          const q = debouncedViewDataSearch.trim().toLowerCase();
-          const filteredRows = q
-            ? fileData.filter((row) =>
-                columns.some((col) => String(row[col] ?? '').toLowerCase().includes(q))
-              )
-            : fileData;
-          return (
-            <div className="bg-white rounded-lg shadow-lg border border-gray-200 p-6 mb-6">
-              <div className="flex justify-between items-center mb-4 flex-wrap gap-3 bg-[#f8f9fa] -m-6 p-4 rounded-t-lg border-b">
-                <h2 className="text-xl font-semibold text-gray-800">View File Data (Excel View)</h2>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="text"
-                    value={viewDataSearch}
-                    onChange={(e) => setViewDataSearch(e.target.value)}
-                    placeholder="Search in data..."
-                    className="px-3 py-1.5 border border-gray-300 rounded text-sm w-52 focus:ring-1 focus:ring-blue-500"
-                  />
-                  {viewDataSearch && (
-                    <button type="button" onClick={() => setViewDataSearch('')} className="px-2 py-1.5 text-sm bg-gray-200 rounded hover:bg-gray-300">Clear</button>
-                  )}
-                </div>
-                <button
-                  onClick={() => {
-                    setViewingFileId(null);
-                    setFileData([]);
-                    setViewDataSearch('');
-                  }}
-                  className="px-4 py-2 text-gray-600 hover:text-gray-800 border border-gray-300 rounded-md"
-                >
-                  Close
-                </button>
-              </div>
-              <div className="overflow-auto max-h-[70vh] bg-[#e2e8f0] p-2 rounded">
-                <div className="inline-block min-w-full border border-gray-300 bg-white shadow-sm" style={{ fontFamily: 'Calibri, Arial, sans-serif' }}>
-                  <table className="border-collapse" style={{ tableLayout: 'fixed', minWidth: 'max-content' }}>
-                    <thead>
-                      <tr>
-                        <th className="sticky left-0 top-0 z-20 w-12 min-w-12 px-2 py-1.5 text-center text-xs font-semibold bg-[#217346] text-white border border-gray-400 shadow-sm" />
-                        {columns.map((col, idx) => (
-                          <th key={col} className="sticky top-0 z-10 min-w-[120px] max-w-[200px] px-2 py-1.5 text-left text-xs font-semibold bg-[#217346] text-white border border-gray-400 whitespace-nowrap">
-                            <span className="text-[10px] text-gray-200 mr-1">{getColumnLetter(idx)}</span>
-                            {col}
-                          </th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {filteredRows.map((row, rowIndex) => (
-                        <tr key={rowIndex} className="hover:bg-[#e8f4ea]">
-                          <td className="sticky left-0 z-10 w-12 min-w-12 px-2 py-1 text-center text-xs font-medium bg-[#f3f4f6] text-gray-600 border border-gray-300">
-                            {rowIndex + 1}
-                          </td>
-                          {columns.map((col) => (
-                            <td key={col} className="px-2 py-1 text-sm border border-gray-300 min-w-[120px] max-w-[200px] bg-white">
-                              {highlightAllSearchMatches(row[col], debouncedViewDataSearch)}
-                            </td>
-                          ))}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-                {filteredRows.length === 0 && <p className="text-gray-500 py-4 text-center">No rows match search.</p>}
-              </div>
-              <div className="mt-3 text-sm text-gray-600">
-                {fileData.length} row(s){debouncedViewDataSearch && ` (showing ${filteredRows.length} matching)`} × {columns.length} columns
-              </div>
-            </div>
-          );
-        })()}
 
       </div>
     </div>

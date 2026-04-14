@@ -12,6 +12,149 @@ import * as XLSX from 'xlsx';
 import mongoose from 'mongoose';
 import { emitFormatDailyMergeInvalidate } from '@/lib/unifiedDataSocket';
 
+/** Regenerate admin merged outputs that list this file as a source. */
+async function regenerateMergedFilesForSource(args: {
+  sourceFileId: string;
+  sourceOriginalFilename: string;
+  userId: string;
+  userName?: string;
+}): Promise<string[]> {
+  const { sourceFileId, sourceOriginalFilename, userId, userName } = args;
+  const userIdObj = new mongoose.Types.ObjectId(userId);
+  const mergedFiles = await CreatedExcelFile.find({
+    isMerged: true,
+    mergedFrom: { $in: [sourceFileId] },
+  })
+    .select('+fileData')
+    .lean();
+
+  const updatedMergedFiles: string[] = [];
+  if (mergedFiles.length === 0) return updatedMergedFiles;
+
+  const ExcelFormatMod = (await import('@/models/ExcelFormat')).default;
+
+  for (const mergedFile of mergedFiles) {
+    try {
+      const sourceFileIds = (mergedFile.mergedFrom || []).map((id: any) => id.toString());
+      const sourceFiles = await CreatedExcelFile.find({
+        _id: { $in: sourceFileIds },
+      })
+        .select('+fileData')
+        .lean();
+
+      if (sourceFiles.length === 0) continue;
+
+      const allHeadersSet = new Set<string>();
+      const fileDataArray: Array<{ filename: string; rows: any[]; headers: string[] }> = [];
+
+      for (const sourceFile of sourceFiles) {
+        const fileBuffer = Buffer.isBuffer(sourceFile.fileData)
+          ? sourceFile.fileData
+          : Buffer.from(sourceFile.fileData as any);
+
+        const workbook = XLSX.read(fileBuffer, { type: 'buffer' });
+        const firstSheetName = workbook.SheetNames[0];
+        const worksheet = workbook.Sheets[firstSheetName];
+        const jsonData = XLSX.utils.sheet_to_json(worksheet, { defval: '' });
+
+        if (jsonData.length > 0) {
+          const fileHeaders = Object.keys(jsonData[0] as any);
+          fileHeaders.forEach((h) => allHeadersSet.add(h));
+          fileDataArray.push({
+            filename: sourceFile.originalFilename,
+            rows: jsonData,
+            headers: fileHeaders,
+          });
+        }
+      }
+
+      if (fileDataArray.length === 0) continue;
+
+      const unifiedHeaders = Array.from(allHeadersSet).sort();
+
+      const allRows: any[] = [];
+      fileDataArray.forEach(({ rows }) => {
+        rows.forEach((row: any) => {
+          const normalizedRow: any = {};
+          unifiedHeaders.forEach((header) => {
+            normalizedRow[header] =
+              row[header] !== undefined && row[header] !== null ? String(row[header]).trim() : '';
+          });
+          allRows.push(normalizedRow);
+        });
+      });
+
+      const activeFormats = await ExcelFormatMod.find({ active: true }).lean();
+      const uniqueColumns: string[] = [];
+      activeFormats.forEach((format: any) => {
+        if (format.columns && Array.isArray(format.columns)) {
+          format.columns.forEach((col: any) => {
+            if (col.unique === true && unifiedHeaders.includes(col.name)) {
+              if (!uniqueColumns.includes(col.name)) {
+                uniqueColumns.push(col.name);
+              }
+            }
+          });
+        }
+      });
+
+      if (uniqueColumns.length > 0) {
+        const seenValues: { [colName: string]: Set<string> } = {};
+        uniqueColumns.forEach((colName: string) => {
+          seenValues[colName] = new Set<string>();
+        });
+
+        const deduplicatedRows: any[] = [];
+        allRows.forEach((row: any) => {
+          let isDuplicate = false;
+          uniqueColumns.forEach((colName: string) => {
+            const value = String(row[colName] || '').trim().toLowerCase();
+            if (value !== '' && seenValues[colName].has(value)) {
+              isDuplicate = true;
+            } else if (value !== '') {
+              seenValues[colName].add(value);
+            }
+          });
+          if (!isDuplicate) {
+            deduplicatedRows.push(row);
+          }
+        });
+
+        allRows.length = 0;
+        allRows.push(...deduplicatedRows);
+      }
+
+      const mergedWorkbook = XLSX.utils.book_new();
+      const mergedWorksheet = XLSX.utils.json_to_sheet(allRows);
+      const colWidths = unifiedHeaders.map(() => ({ wch: 20 }));
+      mergedWorksheet['!cols'] = colWidths;
+      XLSX.utils.book_append_sheet(mergedWorkbook, mergedWorksheet, 'Merged Data');
+
+      const mergedBuffer = Buffer.from(XLSX.write(mergedWorkbook, { type: 'array', bookType: 'xlsx' }));
+
+      await CreatedExcelFile.updateOne(
+        { _id: mergedFile._id },
+        {
+          fileData: mergedBuffer,
+          rowCount: allRows.length,
+          lastEditedAt: new Date(),
+          lastEditedBy: userIdObj,
+          lastEditedByName: userName || 'User',
+        }
+      );
+
+      updatedMergedFiles.push(mergedFile.originalFilename);
+      console.log(
+        `Auto-updated merged file: ${mergedFile.originalFilename} after editing source file: ${sourceOriginalFilename}`
+      );
+    } catch (error: any) {
+      console.error(`Failed to auto-update merged file ${mergedFile._id}:`, error);
+    }
+  }
+
+  return updatedMergedFiles;
+}
+
 /**
  * POST /api/employee/save-excel
  * Save an Excel file created by the user
@@ -465,6 +608,7 @@ async function handleSaveExcel(req: AuthenticatedRequest) {
       const oldPickedIndices = Array.isArray(existingFile.pickedTemplateRowIndices)
         ? [...existingFile.pickedTemplateRowIndices]
         : [];
+      const isPickBackedFile = oldPickedIndices.length > 0;
       let newPickedIndices: number[] = oldPickedIndices;
       if (updateFormatId && mongoose.Types.ObjectId.isValid(updateFormatId)) {
         existingFile.formatId = new mongoose.Types.ObjectId(updateFormatId);
@@ -476,22 +620,27 @@ async function handleSaveExcel(req: AuthenticatedRequest) {
       if (updateRowIndicesRaw) {
         try {
           const parsed = JSON.parse(updateRowIndicesRaw);
-          newPickedIndices = Array.isArray(parsed)
-            ? parsed.filter((i: number) => typeof i === 'number' && i >= 0)
-            : oldPickedIndices;
-          existingFile.pickedTemplateRowIndices = newPickedIndices;
+          if (Array.isArray(parsed)) {
+            const parsedArr = parsed.filter((i: number) => typeof i === 'number' && i >= 0);
+            // Only pick-backed files persist template indices. Daily saves also sent rowIndices for
+            // merge hints; storing them turned day files into "picks" and broke My data UI.
+            if (isPickBackedFile) {
+              newPickedIndices = parsedArr;
+              existingFile.pickedTemplateRowIndices = newPickedIndices;
+            }
+          }
         } catch {
           // keep existing
         }
-      } else if (pickRowIndices.length > 0 && oldPickedIndices.length === 0) {
-        // Same idea: keep indices for admin overlay merge when client doesn't send rowIndices on PUT.
-        existingFile.pickedTemplateRowIndices = pickRowIndices;
-        newPickedIndices = pickRowIndices;
+      }
+      const dailyWorkYmdPut = (formData.get('dailyWorkDate') as string)?.trim();
+      if (dailyWorkYmdPut && /^\d{4}-\d{2}-\d{2}$/.test(dailyWorkYmdPut)) {
+        existingFile.dailyWorkDate = dailyWorkYmdPut;
       }
       await existingFile.save();
 
       // Sync PickedTemplateRow so admin sees who picked each row (claim new rows, release removed rows)
-      if (updateFormatId && newPickedIndices.length >= 0) {
+      if (updateFormatId && isPickBackedFile && newPickedIndices.length >= 0) {
         const formatIdObj = new mongoose.Types.ObjectId(updateFormatId);
         const existingPicks = await PickedTemplateRow.find({
           formatId: formatIdObj,
@@ -532,145 +681,12 @@ async function handleSaveExcel(req: AuthenticatedRequest) {
         }
       }
 
-      // Find all merged files that include this file in their mergedFrom array
-      const mergedFiles = await CreatedExcelFile.find({
-        isMerged: true,
-        mergedFrom: { $in: [fileId] }
-      }).select('+fileData').lean();
-
-      const updatedMergedFiles: string[] = [];
-
-      // Regenerate each merged file that includes this edited file
-      if (mergedFiles.length > 0) {
-        const ExcelFormat = (await import('@/models/ExcelFormat')).default;
-        
-        for (const mergedFile of mergedFiles) {
-          try {
-            // Get all source files for this merged file
-            const sourceFileIds = (mergedFile.mergedFrom || []).map((id: any) => id.toString());
-            const sourceFiles = await CreatedExcelFile.find({
-              _id: { $in: sourceFileIds }
-            }).select('+fileData').lean();
-
-            if (sourceFiles.length === 0) continue;
-
-            // Reuse merge logic to regenerate the merged file
-            const allHeadersSet = new Set<string>();
-            const fileDataArray: Array<{ filename: string; rows: any[]; headers: string[] }> = [];
-
-            // Process each source file
-            for (const sourceFile of sourceFiles) {
-              const fileBuffer = Buffer.isBuffer(sourceFile.fileData) 
-                ? sourceFile.fileData 
-                : Buffer.from(sourceFile.fileData as any);
-              
-              const workbook = XLSX.read(fileBuffer, { type: 'buffer' });
-              const firstSheetName = workbook.SheetNames[0];
-              const worksheet = workbook.Sheets[firstSheetName];
-              const jsonData = XLSX.utils.sheet_to_json(worksheet, { defval: '' });
-
-              if (jsonData.length > 0) {
-                const fileHeaders = Object.keys(jsonData[0] as any);
-                fileHeaders.forEach(h => allHeadersSet.add(h));
-                fileDataArray.push({
-                  filename: sourceFile.originalFilename,
-                  rows: jsonData,
-                  headers: fileHeaders,
-                });
-              }
-            }
-
-            if (fileDataArray.length === 0) continue;
-
-            // Create unified headers
-            const unifiedHeaders = Array.from(allHeadersSet).sort();
-            
-            // Normalize all rows
-            const allRows: any[] = [];
-            fileDataArray.forEach(({ rows }) => {
-              rows.forEach((row: any) => {
-                const normalizedRow: any = {};
-                unifiedHeaders.forEach(header => {
-                  normalizedRow[header] = row[header] !== undefined && row[header] !== null 
-                    ? String(row[header]).trim() 
-                    : '';
-                });
-                allRows.push(normalizedRow);
-              });
-            });
-
-            // Handle unique columns (remove duplicates)
-            const activeFormats = await ExcelFormat.find({ active: true }).lean();
-            const uniqueColumns: string[] = [];
-            activeFormats.forEach((format: any) => {
-              if (format.columns && Array.isArray(format.columns)) {
-                format.columns.forEach((col: any) => {
-                  if (col.unique === true && unifiedHeaders.includes(col.name)) {
-                    if (!uniqueColumns.includes(col.name)) {
-                      uniqueColumns.push(col.name);
-                    }
-                  }
-                });
-              }
-            });
-
-            if (uniqueColumns.length > 0) {
-              const seenValues: { [colName: string]: Set<string> } = {};
-              uniqueColumns.forEach((colName: string) => {
-                seenValues[colName] = new Set<string>();
-              });
-              
-              const deduplicatedRows: any[] = [];
-              allRows.forEach((row: any) => {
-                let isDuplicate = false;
-                uniqueColumns.forEach((colName: string) => {
-                  const value = String(row[colName] || '').trim().toLowerCase();
-                  if (value !== '' && seenValues[colName].has(value)) {
-                    isDuplicate = true;
-                  } else if (value !== '') {
-                    seenValues[colName].add(value);
-                  }
-                });
-                if (!isDuplicate) {
-                  deduplicatedRows.push(row);
-                }
-              });
-              
-              allRows.length = 0;
-              allRows.push(...deduplicatedRows);
-            }
-
-            // Create merged workbook
-            const mergedWorkbook = XLSX.utils.book_new();
-            const mergedWorksheet = XLSX.utils.json_to_sheet(allRows);
-            const colWidths = unifiedHeaders.map(() => ({ wch: 20 }));
-            mergedWorksheet['!cols'] = colWidths;
-            XLSX.utils.book_append_sheet(mergedWorkbook, mergedWorksheet, 'Merged Data');
-
-            // Generate Excel buffer
-            const mergedBuffer = Buffer.from(
-              XLSX.write(mergedWorkbook, { type: 'array', bookType: 'xlsx' })
-            );
-
-            // Update the merged file
-            await CreatedExcelFile.updateOne(
-              { _id: mergedFile._id },
-              {
-                fileData: mergedBuffer,
-                rowCount: allRows.length,
-                lastEditedAt: new Date(),
-                lastEditedBy: userIdObj,
-                lastEditedByName: userName || 'User',
-              }
-            );
-
-            updatedMergedFiles.push(mergedFile.originalFilename);
-            console.log(`Auto-updated merged file: ${mergedFile.originalFilename} after editing source file: ${existingFile.originalFilename}`);
-          } catch (error: any) {
-            console.error(`Failed to auto-update merged file ${mergedFile._id}:`, error);
-          }
-        }
-      }
+      const updatedMergedFiles = await regenerateMergedFilesForSource({
+        sourceFileId: fileId,
+        sourceOriginalFilename: existingFile.originalFilename,
+        userId: userId as string,
+        userName,
+      });
 
       const fmtStr = existingFile.formatId?.toString?.();
       if (fmtStr) emitFormatDailyMergeInvalidate({ formatId: fmtStr });
@@ -723,8 +739,134 @@ async function handleSaveExcel(req: AuthenticatedRequest) {
           createPayload.pickedTemplateRowIndices = pickRowIndices;
         }
       }
+
+      const dailyWorkYmdPost = (formData.get('dailyWorkDate') as string)?.trim();
+      const dailyWorkDateKey =
+        !isPickSave &&
+        dailyWorkYmdPost &&
+        /^\d{4}-\d{2}-\d{2}$/.test(dailyWorkYmdPost)
+          ? dailyWorkYmdPost
+          : null;
+
+      const userIdObjPost = new mongoose.Types.ObjectId(userId as string);
+
+      if (dailyWorkDateKey) {
+        const esc = dailyWorkDateKey.replace(/-/g, '\\-');
+        const dayEndRegex = new RegExp(`_${esc}\\.xlsx$`, 'i');
+        // Prefer exact filename (all My data saves for a day use the same name); include legacy
+        // rows with missing formatId so old duplicates still consolidate.
+        const formatOrLegacy = {
+          $or: [
+            { formatId: createPayload.formatId },
+            { formatId: { $exists: false } },
+            { formatId: null },
+          ],
+        };
+        const dayOrName = {
+          $or: [
+            { dailyWorkDate: dailyWorkDateKey },
+            { originalFilename: dayEndRegex },
+            { originalFilename: file.name },
+          ],
+        };
+        let keeper = await CreatedExcelFile.findOne({
+          createdBy: userIdObjPost,
+          labourType: labourType as string,
+          isMerged: { $ne: true },
+          $and: [formatOrLegacy, dayOrName],
+        }).sort({ updatedAt: -1 });
+
+        if (!keeper) {
+          keeper = await CreatedExcelFile.findOne({
+            createdBy: userIdObjPost,
+            labourType: labourType as string,
+            isMerged: { $ne: true },
+            originalFilename: file.name,
+          }).sort({ updatedAt: -1 });
+        }
+
+        if (keeper) {
+          if (keeper.createdBy.toString() !== userId) {
+            return NextResponse.json(
+              { error: 'Unauthorized: You can only edit your own files' },
+              { status: 403 }
+            );
+          }
+          keeper.originalFilename = file.name;
+          keeper.fileData = buffer;
+          keeper.rowCount = rowCount;
+          keeper.dailyWorkDate = dailyWorkDateKey;
+          keeper.pickedTemplateRowIndices = [];
+          keeper.lastEditedAt = new Date();
+          keeper.lastEditedBy = userIdObjPost;
+          keeper.lastEditedByName = userName;
+          if (!keeper.formatId) {
+            keeper.formatId = createPayload.formatId;
+          }
+          await keeper.save();
+
+          const updatedMergedFilesPost = await regenerateMergedFilesForSource({
+            sourceFileId: keeper._id.toString(),
+            sourceOriginalFilename: keeper.originalFilename,
+            userId: userId as string,
+            userName,
+          });
+
+          await CreatedExcelFile.deleteMany({
+            createdBy: userIdObjPost,
+            labourType: labourType as string,
+            isMerged: { $ne: true },
+            _id: { $ne: keeper._id },
+            originalFilename: file.name,
+          });
+
+          const fmtStrKeeper = keeper.formatId?.toString?.();
+          if (fmtStrKeeper) emitFormatDailyMergeInvalidate({ formatId: fmtStrKeeper });
+
+          return NextResponse.json({
+            success: true,
+            message: 'Excel file updated successfully',
+            data: {
+              id: keeper._id,
+              filename: keeper.originalFilename,
+              labourType: keeper.labourType,
+              rowCount: keeper.rowCount,
+              createdAt: keeper.createdAt,
+              updatedAt: keeper.updatedAt,
+              lastEditedAt: keeper.lastEditedAt,
+              lastEditedBy: keeper.lastEditedBy,
+              lastEditedByName: keeper.lastEditedByName,
+            },
+            updatedMergedFiles:
+              updatedMergedFilesPost.length > 0 ? updatedMergedFilesPost : undefined,
+            mergedFilesUpdated: updatedMergedFilesPost.length,
+          });
+        }
+      }
+
+      if (dailyWorkDateKey) {
+        createPayload.dailyWorkDate = dailyWorkDateKey;
+        createPayload.pickedTemplateRowIndices = [];
+      }
+
       const createdFile = await CreatedExcelFile.create(createPayload);
       const doc = Array.isArray(createdFile) ? createdFile[0] : createdFile;
+
+      if (dailyWorkDateKey) {
+        const siblings = await CreatedExcelFile.find({
+          createdBy: userIdObjPost,
+          labourType: labourType as string,
+          isMerged: { $ne: true },
+          originalFilename: doc.originalFilename,
+        })
+          .sort({ updatedAt: -1 })
+          .select('_id')
+          .lean();
+        if (siblings.length > 1) {
+          const otherIds = siblings.slice(1).map((s) => s._id);
+          await CreatedExcelFile.deleteMany({ _id: { $in: otherIds } });
+        }
+      }
 
       const newFmtStr = doc.formatId?.toString?.();
       if (newFmtStr) emitFormatDailyMergeInvalidate({ formatId: newFmtStr });

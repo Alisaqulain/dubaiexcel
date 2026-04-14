@@ -85,10 +85,8 @@ async function handleGetMyCreatedFile(
           pickedOut = rec.indices;
           rowCountOut = rec.rows.length;
 
-          const colNames = ((fmt as any).columns || [])
-            .map((c: any) => String(c?.name || '').trim())
-            .filter(Boolean);
-          const merged = mergePickFileRowsFromTemplate(jsonData, pickedOut, templateRows, colNames);
+          const fmtCols = (((fmt as any).columns || []) as { name: string; editable?: boolean }[]) || [];
+          const merged = mergePickFileRowsFromTemplate(jsonData, pickedOut, templateRows, fmtCols);
           if (merged.changed) {
             jsonData = merged.rows;
             rowCountOut = jsonData.length;

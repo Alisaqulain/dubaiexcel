@@ -4,7 +4,7 @@ import { useState, useEffect, useMemo, useRef } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useDebounce, SEARCH_DEBOUNCE_MS } from '@/lib/useDebounce';
 import * as XLSX from 'xlsx';
-import { TEMPLATE_ROW_INDEX } from '@/lib/formatTemplateRows';
+import { TEMPLATE_ROW_INDEX, mergeSavedRowsWithTemplateByLocks } from '@/lib/formatTemplateRows';
 
 function getColumnLetter(index: number): string {
   let s = '';
@@ -105,6 +105,8 @@ export interface MyDataDailySaveConfig {
   /** PUT this id when saving today’s file; null = POST new file for today */
   putTargetId: string | null;
   defaultFilename: string;
+  /** Local calendar YYYY-MM-DD; server merges all saves for this day into one file */
+  dailyWorkYmd: string;
 }
 
 interface ExcelCreatorProps {
@@ -118,9 +120,11 @@ interface ExcelCreatorProps {
   editingFileId?: string; // ID of file being edited
   editingFileName?: string; // Display name when editing a saved file (shows "Edit mode")
   initialPickedTemplateRowIndices?: number[]; // When editing a pick file, which template row indices are in the file (for "Add data from file")
-  /** My data tab: one file per calendar day; open save popup with date-based name */
+  /** My data tab: one file per calendar day; Save Excel uses date-based name without a prompt */
   myDataDailySave?: MyDataDailySaveConfig | null;
   onMyDataDailyFileSaved?: (fileId: string, filename: string) => void;
+  /** Parent already merged template + all day saves (pick-workspace-data); do not re-merge in format fetch */
+  workspaceDataPremerged?: boolean;
 }
 
 export default function ExcelCreator({
@@ -136,10 +140,17 @@ export default function ExcelCreator({
   initialPickedTemplateRowIndices,
   myDataDailySave,
   onMyDataDailyFileSaved,
+  workspaceDataPremerged = false,
 }: ExcelCreatorProps) {
   const { token } = useAuth();
   const initialDataRef = useRef(initialData);
   initialDataRef.current = initialData;
+  const initialPickIndicesRef = useRef(initialPickedTemplateRowIndices);
+  initialPickIndicesRef.current = initialPickedTemplateRowIndices;
+  const myDataDailySaveRef = useRef(myDataDailySave);
+  myDataDailySaveRef.current = myDataDailySave;
+  const workspaceDataPremergedRef = useRef(workspaceDataPremerged);
+  workspaceDataPremergedRef.current = workspaceDataPremerged;
   const [rows, setRows] = useState<ExcelRow[]>(initialData || []);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [showBulkOptions, setShowBulkOptions] = useState(false);
@@ -155,11 +166,6 @@ export default function ExcelCreator({
   // Track current editing file ID - clears after save so next save creates new file
   const [currentEditingFileId, setCurrentEditingFileId] = useState<string | undefined>(editingFileId);
   const [pickedRowIndices, setPickedRowIndices] = useState<Set<number>>(new Set());
-  const [showSavePickModal, setShowSavePickModal] = useState(false);
-  const [savePickFilename, setSavePickFilename] = useState('');
-  const [showMyDataSaveModal, setShowMyDataSaveModal] = useState(false);
-  const [myDataSaveFilename, setMyDataSaveFilename] = useState('');
-  const [myDataPendingAction, setMyDataPendingAction] = useState<'save' | 'saveClose' | null>(null);
   const [savingPick, setSavingPick] = useState(false);
   const [pickedByOthers, setPickedByOthers] = useState<Record<number, { empId: string; empName: string }>>({});
   // When editing a pick file: template index per row (null = manual row). Used for "Add data from file" and for saving rowIndices.
@@ -168,6 +174,7 @@ export default function ExcelCreator({
   const [addFromFileSelected, setAddFromFileSelected] = useState<Set<number>>(new Set());
   const [addFromFileSearch, setAddFromFileSearch] = useState('');
   const addFromFileSearchDebounced = useDebounce(addFromFileSearch, 200);
+  const saveExcelInFlightRef = useRef(false);
 
   // Update currentEditingFileId when editingFileId prop changes
   useEffect(() => {
@@ -257,35 +264,69 @@ export default function ExcelCreator({
     if (useCustomFormat && token) {
       setLoadingFormat(true);
       // If formatId is provided, fetch that specific format, otherwise fetch first assigned format
-      const url = formatId 
+      let url = formatId
         ? `/api/employee/excel-formats/${formatId}`
         : '/api/employee/excel-format';
-      
+      const pickIdx = initialPickIndicesRef.current;
+      if (
+        formatId &&
+        Array.isArray(pickIdx) &&
+        pickIdx.length > 0 &&
+        pickIdx.every((x) => typeof x === 'number' && x >= 0)
+      ) {
+        const q = new URLSearchParams();
+        q.set('templateRowIndices', pickIdx.join(','));
+        url += (url.includes('?') ? '&' : '?') + q.toString();
+      }
+
       fetch(url, {
-        headers: { 'Authorization': `Bearer ${token}` },
+        headers: { Authorization: `Bearer ${token}` },
       })
-        .then(res => res.json())
-        .then(result => {
+        .then((res) => res.json())
+        .then((result) => {
           if (result.success && result.data) {
             setCustomFormat(result.data);
-            
+
             // Store template rows (API sends max 250 to avoid lag); use for read-only validation
             const loadedRows = result.data.templateRows || [];
             const totalCount = result.data.templateRowCount ?? loadedRows.length;
-            if (loadedRows.length > 0) {
-              setTemplateRows(loadedRows);
-              const keepSavedRows = !!(
-                initialDataRef.current &&
-                Array.isArray(initialDataRef.current) &&
-                initialDataRef.current.length > 0
-              );
-              if (!keepSavedRows) {
-                setRows(loadedRows);
-              }
+            setTemplateRows(loadedRows);
+
+            const saved = initialDataRef.current;
+            const keepSavedRows = !!(saved && Array.isArray(saved) && saved.length > 0);
+
+            if (workspaceDataPremergedRef.current) {
+              // Rows already built on server (master + chronological day files).
             } else {
-              setTemplateRows([]);
+              const byIndex = result.data.templateRowsByIndex as
+                | Record<string, Record<string, unknown>>
+                | undefined;
+              const cols = (result.data.columns || []) as { name: string; editable?: boolean }[];
+              const pIdx = initialPickIndicesRef.current;
+
+              const canMerge =
+                keepSavedRows &&
+                byIndex &&
+                Object.keys(byIndex).length > 0 &&
+                Array.isArray(pIdx) &&
+                pIdx.length === saved.length &&
+                pIdx.every((x) => typeof x === 'number' && x >= 0) &&
+                cols.length > 0;
+
+              if (canMerge) {
+                const merged = mergeSavedRowsWithTemplateByLocks(
+                  saved as Record<string, unknown>[],
+                  pIdx as number[],
+                  byIndex,
+                  cols,
+                  { explicitEditableOnly: !!myDataDailySaveRef.current }
+                );
+                setRows(merged as ExcelRow[]);
+              } else if (!keepSavedRows) {
+                setRows(loadedRows.length > 0 ? (loadedRows as ExcelRow[]) : []);
+              }
             }
-            
+
             if (totalCount > 250) {
               setMessage({
                 type: 'success',
@@ -296,24 +337,32 @@ export default function ExcelCreator({
             }
           } else {
             // No format assigned - show error
-            setMessage({ 
-              type: 'error', 
-              text: result.error || 'No format assigned to you. Please contact administrator to assign a format. You cannot create Excel files without an assigned format.' 
+            setMessage({
+              type: 'error',
+              text:
+                result.error ||
+                'No format assigned to you. Please contact administrator to assign a format. You cannot create Excel files without an assigned format.',
             });
             setCustomFormat(null);
           }
           setLoadingFormat(false);
         })
-        .catch(err => {
+        .catch((err) => {
           console.error('Failed to fetch format:', err);
-          setMessage({ 
-            type: 'error', 
-            text: 'Failed to load assigned format. Please refresh the page or contact administrator.' 
+          setMessage({
+            type: 'error',
+            text: 'Failed to load assigned format. Please refresh the page or contact administrator.',
           });
           setLoadingFormat(false);
         });
     }
-  }, [useCustomFormat, token, formatId]);
+  }, [
+    useCustomFormat,
+    token,
+    formatId,
+    JSON.stringify(initialPickedTemplateRowIndices ?? []),
+    workspaceDataPremerged,
+  ]);
 
   useEffect(() => {
     if (!useCustomFormat || !formatId || !token || rows.length === 0) {
@@ -787,12 +836,6 @@ export default function ExcelCreator({
    * rowIndices on POST made every template-row save a "pick" file (My data only) — avoid that.
    * Row indices are sent only when updating an existing file (PUT) for pick/template sync.
    */
-  useEffect(() => {
-    if (myDataDailySave?.defaultFilename) {
-      setMyDataSaveFilename(myDataDailySave.defaultFilename);
-    }
-  }, [myDataDailySave?.defaultFilename]);
-
   const appendFormatPickMetaToFormData = (
     formData: FormData,
     explicitPutId?: string | null,
@@ -824,13 +867,9 @@ export default function ExcelCreator({
     }
   };
 
-  const savePickData = async () => {
-    const name = (savePickFilename || '').trim();
-    if (!name) {
-      setMessage({ type: 'error', text: 'Please enter a filename.' });
-      return;
-    }
-    const filename = name.endsWith('.xlsx') ? name : `${name}.xlsx`;
+  const savePickData = async (explicitFilename?: string) => {
+    const raw = (explicitFilename || '').trim() || defaultPickSaveFilename();
+    const filename = raw.endsWith('.xlsx') ? raw : `${raw}.xlsx`;
     if (pickedRowIndices.size === 0) {
       setMessage({ type: 'error', text: 'Please pick at least one row (use the Pick column).' });
       return;
@@ -882,8 +921,6 @@ export default function ExcelCreator({
       });
       const result = await res.json();
       if (result.success) {
-        setShowSavePickModal(false);
-        setSavePickFilename('');
         setPickedRowIndices(new Set());
         setMessage({ type: 'success', text: `Saved "${filename}". Pick files appear under My data; open Work with this to edit.` });
         if (onSaveSuccess) await Promise.resolve(onSaveSuccess());
@@ -940,10 +977,17 @@ export default function ExcelCreator({
     formData.append('file', file);
     formData.append('labourType', labourType);
     formData.append('rowCount', rows.length.toString());
+    if (myDataDailySave?.dailyWorkYmd) {
+      formData.append('dailyWorkDate', myDataDailySave.dailyWorkYmd);
+    }
     // Always attach rowIndices when we can derive them (pick / template-linked rows).
     // "My data" daily save used to omit them, which broke admin merge overlay — server merge now also
     // falls back to positional overlay, but sending indices when known is still best.
-    appendFormatPickMetaToFormData(formData, putFileId);
+    appendFormatPickMetaToFormData(
+      formData,
+      putFileId,
+      myDataDailySave ? { omitRowIndices: true } : undefined
+    );
 
     const response = await fetch('/api/employee/save-excel', {
       method,
@@ -1049,8 +1093,6 @@ export default function ExcelCreator({
       }
       onSaveAndClose?.();
     }
-    setShowMyDataSaveModal(false);
-    setMyDataPendingAction(null);
     return true;
   };
 
@@ -1063,16 +1105,18 @@ export default function ExcelCreator({
       setMessage({ type: 'error', text: 'Authentication required to save files' });
       return;
     }
-
-    if (myDataDailySave) {
-      setMyDataSaveFilename((prev) => (prev.trim() ? prev : myDataDailySave.defaultFilename));
-      setMyDataPendingAction('save');
-      setShowMyDataSaveModal(true);
-      return;
-    }
+    if (saveExcelInFlightRef.current) return;
+    saveExcelInFlightRef.current = true;
 
     try {
       setSaving(true);
+      if (myDataDailySave) {
+        await runServerSave({
+          putFileId: myDataDailySave.putTargetId,
+          filename: myDataDailySave.defaultFilename,
+        });
+        return;
+      }
       const filename =
         currentEditingFileId && editingFileName ? editingFileName : buildNewSaveExcelFilename();
       await runServerSave({
@@ -1083,28 +1127,7 @@ export default function ExcelCreator({
       setMessage({ type: 'error', text: err.message || 'Failed to save Excel file' });
     } finally {
       setSaving(false);
-    }
-  };
-
-  const confirmMyDataSave = async () => {
-    if (!token || !myDataDailySave) return;
-    const name = myDataSaveFilename.trim();
-    if (!name) {
-      setMessage({ type: 'error', text: 'Please enter a file name.' });
-      return;
-    }
-    try {
-      setSaving(true);
-      const closeAfter = myDataPendingAction === 'saveClose';
-      await runServerSave({
-        putFileId: myDataDailySave.putTargetId,
-        filename: name,
-        closeAfter,
-      });
-    } catch (err: any) {
-      setMessage({ type: 'error', text: err.message || 'Failed to save Excel file' });
-    } finally {
-      setSaving(false);
+      saveExcelInFlightRef.current = false;
     }
   };
 
@@ -1458,13 +1481,11 @@ export default function ExcelCreator({
               }) && (
               <button
                 type="button"
-                onClick={() => {
-                  setSavePickFilename((prev) => (prev.trim() ? prev : defaultPickSaveFilename()));
-                  setShowSavePickModal(true);
-                }}
-                className="px-4 py-2 bg-[#217346] text-white rounded-md hover:bg-[#1a5c38] cursor-pointer"
+                onClick={() => void savePickData()}
+                disabled={savingPick || !token}
+                className="px-4 py-2 bg-[#217346] text-white rounded-md hover:bg-[#1a5c38] cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
               >
-                Save my pick
+                {savingPick ? 'Saving...' : 'Save my pick'}
               </button>
             )}
             <button
@@ -1509,14 +1530,19 @@ export default function ExcelCreator({
                     return;
                   }
                   if (!token) return;
-                  if (myDataDailySave) {
-                    setMyDataSaveFilename((prev) => (prev.trim() ? prev : myDataDailySave.defaultFilename));
-                    setMyDataPendingAction('saveClose');
-                    setShowMyDataSaveModal(true);
-                    return;
-                  }
+                  if (saveExcelInFlightRef.current) return;
+                  saveExcelInFlightRef.current = true;
                   try {
                     setSaving(true);
+                    if (myDataDailySave) {
+                      const ok = await runServerSave({
+                        putFileId: myDataDailySave.putTargetId,
+                        filename: myDataDailySave.defaultFilename,
+                        closeAfter: true,
+                      });
+                      if (!ok) setSaving(false);
+                      return;
+                    }
                     const filename =
                       currentEditingFileId && editingFileName ? editingFileName : buildNewSaveExcelFilename();
                     const ok = await runServerSave({
@@ -1529,6 +1555,7 @@ export default function ExcelCreator({
                     setMessage({ type: 'error', text: err.message || 'Failed to save file' });
                   } finally {
                     setSaving(false);
+                    saveExcelInFlightRef.current = false;
                   }
                 }}
                 disabled={saving || !token || rows.length === 0}
@@ -1547,67 +1574,6 @@ export default function ExcelCreator({
           </div>
         </>
       )}
-      {showMyDataSaveModal && myDataDailySave && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
-          onClick={() => !saving && setShowMyDataSaveModal(false)}
-        >
-          <div className="bg-white rounded-lg shadow-xl p-6 max-w-md w-full mx-4" onClick={(e) => e.stopPropagation()}>
-            <h3 className="text-lg font-semibold text-gray-800 mb-2">Save today&apos;s file</h3>
-            <p className="text-sm text-gray-600 mb-3">
-              One file per day for this format: saving again today updates the same file. A new calendar day creates a new file. Default name uses today&apos;s date.
-            </p>
-            <label className="block text-xs font-medium text-gray-600 mb-1">File name</label>
-            <input
-              type="text"
-              value={myDataSaveFilename}
-              onChange={(e) => setMyDataSaveFilename(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md mb-4"
-              autoFocus
-            />
-            <div className="flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => !saving && setShowMyDataSaveModal(false)}
-                className="px-4 py-2 text-gray-700 bg-gray-200 rounded-md hover:bg-gray-300"
-                disabled={saving}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={() => void confirmMyDataSave()}
-                disabled={saving}
-                className="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 disabled:opacity-60"
-              >
-                {saving ? 'Saving...' : 'Save'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {showSavePickModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => !savingPick && setShowSavePickModal(false)}>
-          <div className="bg-white rounded-lg shadow-xl p-6 max-w-md w-full mx-4" onClick={(e) => e.stopPropagation()}>
-            <h3 className="text-lg font-semibold text-gray-800 mb-2">Save my pick</h3>
-            <p className="text-sm text-gray-600 mb-3">Enter a filename. Only the rows you picked will be saved. The file will appear in My Saved Excel Files with the same workflow (bulk, save, etc.).</p>
-            <input
-              type="text"
-              value={savePickFilename}
-              onChange={(e) => setSavePickFilename(e.target.value)}
-              placeholder="e.g. my_work.xlsx"
-              className="w-full px-3 py-2 border border-gray-300 rounded-md mb-4"
-              autoFocus
-            />
-            <div className="flex justify-end gap-2">
-              <button type="button" onClick={() => !savingPick && setShowSavePickModal(false)} className="px-4 py-2 text-gray-700 bg-gray-200 rounded-md hover:bg-gray-300" disabled={savingPick}>Cancel</button>
-              <button type="button" onClick={savePickData} disabled={savingPick} className="px-4 py-2 bg-[#217346] text-white rounded-md hover:bg-[#1a5c38] disabled:opacity-60">{savingPick ? 'Saving...' : 'Save'}</button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {showAddFromFileModal && templateRows.length > 0 && (() => {
         const searchTrim = addFromFileSearchDebounced.trim().toLowerCase();
         const withTemplateIdx = templateRows.map((row) => ({
