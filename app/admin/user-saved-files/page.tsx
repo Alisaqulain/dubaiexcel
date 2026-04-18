@@ -1,10 +1,12 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import Link from 'next/link';
+import { io, type Socket } from 'socket.io-client';
 import { ProtectedRoute } from '../../components/ProtectedRoute';
 import Navigation from '../../components/Navigation';
 import { useAuth } from '../../context/AuthContext';
+import { FormatStyleDailyMerge } from './components/FormatStyleDailyMerge';
 
 type CreatedByPop = { _id?: string; name?: string; email?: string } | string | null;
 type FormatPop = { _id?: string; name?: string } | string | null;
@@ -25,6 +27,12 @@ interface FileRow {
   createdByName?: string;
   createdByEmail?: string;
   createdBy?: CreatedByPop;
+}
+
+interface FormatOption {
+  _id: string;
+  name: string;
+  active?: boolean;
 }
 
 const PAGE_SIZE = 30;
@@ -75,6 +83,21 @@ function UserSavedFilesDashboard() {
   const [labourType, setLabourType] = useState('');
   const [mergedFilter, setMergedFilter] = useState<'false' | 'true' | 'all'>('false');
 
+  const [formats, setFormats] = useState<FormatOption[]>([]);
+  const [formatsLoading, setFormatsLoading] = useState(false);
+  const [mergeFormatId, setMergeFormatId] = useState<string | null>(null);
+  const [mergeDate, setMergeDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [mergeDates, setMergeDates] = useState<string[]>([]);
+  const [mergeDatesLoading, setMergeDatesLoading] = useState(false);
+  const [mergeDatesError, setMergeDatesError] = useState<string | null>(null);
+  const [mergeRefreshKey, setMergeRefreshKey] = useState(0);
+
+  const mergeFormatIdRef = useRef<string | null>(null);
+  mergeFormatIdRef.current = mergeFormatId;
+
+  const loadMergeDatesRef = useRef<() => void>(() => {});
+  const loadFilesRef = useRef<() => void>(() => {});
+
   const [preview, setPreview] = useState<{
     id: string;
     filename: string;
@@ -89,6 +112,73 @@ function UserSavedFilesDashboard() {
     const t = window.setTimeout(() => setQDebounced(q.trim()), 350);
     return () => window.clearTimeout(t);
   }, [q]);
+
+  const loadFormats = useCallback(async () => {
+    if (!token) return;
+    setFormatsLoading(true);
+    try {
+      const res = await fetch('/api/admin/excel-formats', {
+        headers: { Authorization: `Bearer ${token}` },
+        cache: 'no-store',
+      });
+      const json = await res.json();
+      if (!res.ok || !json.success) return;
+      const list = (json.data || []) as FormatOption[];
+      setFormats(list);
+      setMergeFormatId((prev) => {
+        if (prev && list.some((f) => f._id === prev)) return prev;
+        const first = list.find((f) => f.active !== false);
+        return first?._id ?? list[0]?._id ?? null;
+      });
+    } catch {
+      setFormats([]);
+    } finally {
+      setFormatsLoading(false);
+    }
+  }, [token]);
+
+  useEffect(() => {
+    void loadFormats();
+  }, [loadFormats]);
+
+  const loadMergeDates = useCallback(async () => {
+    if (!token || !mergeFormatId) {
+      setMergeDates([]);
+      return;
+    }
+    setMergeDatesLoading(true);
+    setMergeDatesError(null);
+    try {
+      const res = await fetch(`/api/admin/format-merge-dates?formatId=${encodeURIComponent(mergeFormatId)}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        cache: 'no-store',
+      });
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        throw new Error(json.error || 'Failed to load merge dates');
+      }
+      const dates = (json.data?.dates || []) as string[];
+      setMergeDates(dates);
+    } catch (e: unknown) {
+      setMergeDatesError(e instanceof Error ? e.message : 'Failed to load dates');
+      setMergeDates([]);
+    } finally {
+      setMergeDatesLoading(false);
+    }
+  }, [token, mergeFormatId]);
+
+  loadMergeDatesRef.current = () => {
+    void loadMergeDates();
+  };
+
+  useEffect(() => {
+    void loadMergeDates();
+  }, [loadMergeDates]);
+
+  useEffect(() => {
+    if (mergeDates.length === 0) return;
+    setMergeDate((prev) => (mergeDates.includes(prev) ? prev : mergeDates[0]));
+  }, [mergeDates]);
 
   const load = useCallback(async () => {
     if (!token) return;
@@ -121,6 +211,10 @@ function UserSavedFilesDashboard() {
     }
   }, [token, page, qDebounced, labourType, mergedFilter]);
 
+  loadFilesRef.current = () => {
+    void load();
+  };
+
   useEffect(() => {
     void load();
   }, [load]);
@@ -128,6 +222,40 @@ function UserSavedFilesDashboard() {
   useEffect(() => {
     setPage(0);
   }, [qDebounced, labourType, mergedFilter]);
+
+  useEffect(() => {
+    if (!token) return;
+    const url =
+      typeof window !== 'undefined'
+        ? process.env.NEXT_PUBLIC_APP_ORIGIN || window.location.origin
+        : '';
+    let socket: Socket | null = null;
+    let cancelled = false;
+    const scheduleId = window.setTimeout(() => {
+      if (cancelled) return;
+      socket = io(url, {
+        path: '/socket.io',
+        auth: { token },
+        transports: ['websocket', 'polling'],
+      });
+      socket.on('format_daily_merge_invalidate', (payload: unknown) => {
+        const formatId = (payload as { formatId?: string })?.formatId;
+        if (!formatId || typeof formatId !== 'string') return;
+        if (formatId !== mergeFormatIdRef.current) return;
+        setMergeRefreshKey((k) => k + 1);
+        loadMergeDatesRef.current();
+        loadFilesRef.current();
+      });
+    }, 0);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(scheduleId);
+      if (socket) {
+        socket.removeAllListeners();
+        socket.disconnect();
+      }
+    };
+  }, [token]);
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
@@ -181,7 +309,7 @@ function UserSavedFilesDashboard() {
       const cd = res.headers.get('Content-Disposition');
       let fname = filename || `file_${id}.xlsx`;
       if (cd) {
-        const m = cd.match(/filename="([^"]+)"/) || cd.match(/filename\*?=(?:UTF-8'')?["']?([^"';]+)/i);
+        const m = cd.match(/filename="([^"]+)"/) || cd.match(/filename\*?=(?:UTF-8'')?([^"';]+)/i);
         if (m) fname = decodeURIComponent(m[1].trim());
       }
       const url = URL.createObjectURL(blob);
@@ -201,29 +329,86 @@ function UserSavedFilesDashboard() {
     return 'All saved files';
   }, [mergedFilter]);
 
+  const selectedFormatName = useMemo(() => {
+    const f = formats.find((x) => x._id === mergeFormatId);
+    return f?.name || '';
+  }, [formats, mergeFormatId]);
+
+  const refreshAll = () => {
+    void loadFormats();
+    void loadMergeDates();
+    void load();
+    setMergeRefreshKey((k) => k + 1);
+  };
+
   return (
-    <div className="mx-auto flex max-w-[1400px] flex-col gap-4 px-3 py-4">
+    <div className="mx-auto flex max-w-[1600px] flex-col gap-4 px-3 py-4">
       <header className="flex flex-wrap items-end justify-between gap-3 border-b border-gray-200 pb-3">
         <div>
           <h1 className="text-lg font-bold text-gray-900">User saved files</h1>
-          <p className="mt-0.5 max-w-2xl text-xs text-gray-600">
-            Every Excel saved by employees or users (from My data, picks, or general save). Open a row to
-            preview grid data, or download the original file.{' '}
+          <p className="mt-0.5 max-w-3xl text-xs text-gray-600">
+            <strong>Full sheet</strong> matches{' '}
+            <Link href="/admin/format-view" className="font-medium text-blue-700 hover:underline">
+              Format &amp; picks
+            </Link>{' '}
+            (all template rows, including rows nobody picked). Change the date to see that day&apos;s merged user
+            saves. Also:{' '}
             <Link href="/admin/all-merge-data" className="font-medium text-blue-700 hover:underline">
               All merge data
-            </Link>{' '}
-            still builds the day-level master view.
+            </Link>
+            . Raw files are listed below.
           </p>
         </div>
         <button
           type="button"
-          onClick={() => void load()}
-          disabled={loading}
+          onClick={() => refreshAll()}
+          disabled={loading || mergeDatesLoading || formatsLoading}
           className="rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white shadow hover:bg-blue-700 disabled:opacity-50"
         >
-          {loading ? 'Refreshing…' : 'Refresh'}
+          {loading || mergeDatesLoading ? 'Refreshing…' : 'Refresh all'}
         </button>
       </header>
+
+      <div className="flex flex-wrap items-end gap-3 rounded-lg border border-gray-200 bg-white p-3 shadow-sm">
+        <div>
+          <label className="block text-xs font-medium text-gray-700">Format for merged sheet</label>
+          <select
+            value={mergeFormatId || ''}
+            onChange={(e) => setMergeFormatId(e.target.value || null)}
+            disabled={formatsLoading || formats.length === 0}
+            className="mt-1 min-w-[260px] rounded-md border border-gray-300 bg-white px-3 py-2 text-sm focus:border-blue-500 focus:outline-none"
+          >
+            {formats.length === 0 ? (
+              <option value="">No formats</option>
+            ) : (
+              formats.map((f) => (
+                <option key={f._id} value={f._id}>
+                  {f.name || 'Untitled'}
+                  {f.active === false ? ' (inactive)' : ''}
+                </option>
+              ))
+            )}
+          </select>
+        </div>
+        {mergeDatesLoading && <p className="text-xs text-gray-600">Loading days with saves…</p>}
+        {mergeDatesError && <p className="text-xs text-red-700">{mergeDatesError}</p>}
+        {!mergeDatesLoading && mergeFormatId && mergeDates.length === 0 && (
+          <p className="text-xs text-gray-600">No day-stamped saves for this format yet — pick a date anyway to see the master sheet.</p>
+        )}
+      </div>
+
+      <FormatStyleDailyMerge
+        token={token}
+        formatId={mergeFormatId}
+        formatName={selectedFormatName}
+        mergeDate={mergeDate}
+        onMergeDateChange={setMergeDate}
+        refreshKey={mergeRefreshKey}
+        quickDates={mergeDates}
+        formatsLoading={formatsLoading}
+      />
+
+      <h2 className="text-sm font-semibold text-gray-900">Individual files</h2>
 
       <div className="flex flex-wrap items-end gap-3 rounded-lg border border-gray-200 bg-white p-3 shadow-sm">
         <div className="min-w-[200px] flex-1">
@@ -263,6 +448,12 @@ function UserSavedFilesDashboard() {
         </div>
         <p className="text-xs text-gray-500">
           {filterSummary} · <strong>{total}</strong> matching
+          {selectedFormatName ? (
+            <>
+              {' '}
+              · sheet above: <strong>{selectedFormatName}</strong>
+            </>
+          ) : null}
         </p>
       </div>
 

@@ -186,6 +186,7 @@ async function handleGet(req: AuthenticatedRequest) {
       const { [ROW_SOURCE_FILE_ID]: _sid, ...rest } = r;
       return rest;
     });
+    const rowTemplateIndices = mergeResult.rowStorageIndices;
 
     return NextResponse.json({
       success: true,
@@ -199,6 +200,8 @@ async function handleGet(req: AuthenticatedRequest) {
         columns: columnOrder.filter((c) => c !== ROW_SOURCE_FILE_ID),
         rows: rowsOut,
         rowMeta,
+        /** Parallel to `rows`: template storage index in FormatTemplateData.rows, or null for appended rows. */
+        rowTemplateIndices,
         ...(mergeDebug ? { debug: mergeDebug } : {}),
       },
     });

@@ -2,16 +2,23 @@ import * as XLSX from 'xlsx';
 import mongoose from 'mongoose';
 import CreatedExcelFile from '@/models/CreatedExcelFile';
 import { isTemplateRowDeleted, TEMPLATE_ROW_INDEX } from '@/lib/formatTemplateRows';
+import {
+  SUBMITTED_BY_COL,
+  PICKED_BY_COL,
+  SAVED_AT_COL,
+  LAST_SAVED_COL,
+  ROW_SOURCE_FILE_ID,
+  MERGE_NOTE_COL,
+} from '@/lib/formatDailyMergeConstants';
 
-export const SUBMITTED_BY_COL = 'Submitted by';
-/** Who claimed the template row (Format view / pick); not overwritten by save overlay. */
-export const PICKED_BY_COL = 'Picked by';
-/** Employee’s saved .xlsx display name (same workbook for every row from that file). */
-export const SAVED_AT_COL = 'Saved at (file)';
-export const LAST_SAVED_COL = 'Last saved';
-/** Internal row meta for admin UI (open full file); not listed in columnOrder / Excel. */
-export const ROW_SOURCE_FILE_ID = '_sourceFileId';
-export const MERGE_NOTE_COL = 'Merge note';
+export {
+  SUBMITTED_BY_COL,
+  PICKED_BY_COL,
+  SAVED_AT_COL,
+  LAST_SAVED_COL,
+  ROW_SOURCE_FILE_ID,
+  MERGE_NOTE_COL,
+} from '@/lib/formatDailyMergeConstants';
 
 /** Normalize for comparing IDs across template vs saved file. */
 function normId(s: string): string {
