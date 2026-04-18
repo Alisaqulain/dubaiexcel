@@ -4,16 +4,25 @@ import { withAdmin, AuthenticatedRequest } from '@/lib/middleware';
 import ExcelFormat from '@/models/ExcelFormat';
 import FormatTemplateData from '@/models/FormatTemplateData';
 import CreatedExcelFile from '@/models/CreatedExcelFile';
+import PickedTemplateRow from '@/models/PickedTemplateRow';
 import {
   parseClientDayRangeIso,
   parseDayRangeUtc,
   mergeAdminTemplateDailyMerge,
+  applyPickedByToAdminMerge,
   loadCreatedFilesForFormatAndDay,
   buildMergeXlsxBuffer,
   SUBMITTED_BY_COL,
   ROW_SOURCE_FILE_ID,
 } from '@/lib/formatDailyMerge';
 import mongoose from 'mongoose';
+
+function looksLikeDailyEmployeeSave(d: Record<string, unknown>): boolean {
+  const ymd = d.dailyWorkDate;
+  if (typeof ymd === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(ymd)) return true;
+  const name = String(d.originalFilename || '');
+  return /_[0-9]{4}-[0-9]{2}-[0-9]{2}\.xlsx$/i.test(name);
+}
 
 /**
  * GET /api/admin/merged-data?date=YYYY-MM-DD
@@ -30,6 +39,8 @@ async function handleGet(req: AuthenticatedRequest) {
     const formatIdParam = searchParams.get('formatId');
     let date = searchParams.get('date') || '';
     const download = searchParams.get('download') === '1' || searchParams.get('download') === 'true';
+    const debugMerge =
+      searchParams.get('debugMerge') === '1' || searchParams.get('debugMerge') === 'true';
     const rangeStartQ = searchParams.get('rangeStart');
     const rangeEndQ = searchParams.get('rangeEnd');
 
@@ -80,15 +91,27 @@ async function handleGet(req: AuthenticatedRequest) {
       return NextResponse.json({ error: 'Format not found' }, { status: 404 });
     }
 
-    const [docs, templateData] = await Promise.all([
-      loadCreatedFilesForFormatAndDay(formatIdObj, range.start, range.end),
+    const [docs, templateData, pickDocs] = await Promise.all([
+      loadCreatedFilesForFormatAndDay(formatIdObj, range.start, range.end, date),
       FormatTemplateData.findOne({ formatId: formatIdObj }).lean(),
+      PickedTemplateRow.find({ formatId: formatIdObj }).select('rowIndex empName empId').lean(),
     ]);
 
-    const { rows, columnOrder } = mergeAdminTemplateDailyMerge(
+    const mergeResult = mergeAdminTemplateDailyMerge(
       (fmt as { columns?: { name: string; order?: number }[] }).columns,
       templateData?.rows as unknown[] | undefined,
       docs as any[]
+    );
+    const picksForMerge = (pickDocs as { rowIndex?: number; empName?: string; empId?: string }[]).map((p) => ({
+      rowIndex: Number(p.rowIndex),
+      empName: p.empName,
+      empId: p.empId,
+    }));
+    const { rows, columnOrder } = applyPickedByToAdminMerge(
+      mergeResult.rows,
+      mergeResult.columnOrder,
+      mergeResult.rowStorageIndices,
+      picksForMerge
     );
 
     const rowMeta = rows.map((row) => {
@@ -96,6 +119,48 @@ async function handleGet(req: AuthenticatedRequest) {
       const isModified = editedBy.length > 0;
       return { isModified, editedBy };
     });
+
+    const mergeDebug = debugMerge
+      ? {
+          date,
+          rangeUtc: { start: range.start.toISOString(), end: range.end.toISOString() },
+          fileCount: docs.length,
+          dailyFilesMissingPickIndices: (docs as Record<string, unknown>[]).filter(
+            (d) =>
+              looksLikeDailyEmployeeSave(d) &&
+              (!Array.isArray(d.pickedTemplateRowIndices) || d.pickedTemplateRowIndices.length === 0)
+          ).length,
+          files: (docs as Record<string, unknown>[]).map((d) => ({
+            id: String(d._id ?? ''),
+            originalFilename: d.originalFilename,
+            dailyWorkDate: d.dailyWorkDate,
+            lastEditedAt: d.lastEditedAt,
+            updatedAt: d.updatedAt,
+            pickIndicesLen: Array.isArray(d.pickedTemplateRowIndices)
+              ? (d.pickedTemplateRowIndices as unknown[]).length
+              : 0,
+            fileDataBytes:
+              d.fileData != null
+                ? typeof d.fileData === 'object' && 'length' in (d.fileData as object)
+                  ? Number((d.fileData as { length: number }).length)
+                  : -1
+                : 0,
+          })),
+          rowCount: rows.length,
+          rowsWithSaveOverlay: rows.filter((r) => String(r[SUBMITTED_BY_COL] ?? '').trim().length > 0)
+            .length,
+        }
+      : undefined;
+
+    if (mergeDebug) {
+      console.log('[merged-data] debugMerge', mergeDebug);
+      if (mergeDebug.dailyFilesMissingPickIndices > 0) {
+        console.warn(
+          '[merged-data] Some day-stamped saves lack pickedTemplateRowIndices (re-save from employee app to fix; admin showed master HR until then). Count:',
+          mergeDebug.dailyFilesMissingPickIndices
+        );
+      }
+    }
 
     if (download) {
       const buf = buildMergeXlsxBuffer(rows, columnOrder, 'Merged_data');
@@ -134,6 +199,7 @@ async function handleGet(req: AuthenticatedRequest) {
         columns: columnOrder.filter((c) => c !== ROW_SOURCE_FILE_ID),
         rows: rowsOut,
         rowMeta,
+        ...(mergeDebug ? { debug: mergeDebug } : {}),
       },
     });
   } catch (e: any) {

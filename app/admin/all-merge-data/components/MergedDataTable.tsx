@@ -4,6 +4,7 @@ import { useMemo, type ReactNode } from 'react';
 import { highlightAllSearchMatches } from '../../../components/HighlightSearch';
 
 const SUBMITTED_BY = 'Submitted by';
+const PICKED_BY = 'Picked by';
 
 export interface RowMeta {
   isModified: boolean;
@@ -23,6 +24,10 @@ interface MergedDataTableProps {
   error: string | null;
   /** Table grows to fill parent height (scroll inside grid). */
   fillScreen?: boolean;
+  /** Log each visible row and stronger Edit diagnostics (set localStorage adminTableDebug=1). */
+  debugLogRows?: boolean;
+  /** Current format (for future deep-links). */
+  formatId?: string | null;
 }
 
 function colLetter(i: number): string {
@@ -47,6 +52,8 @@ export function MergedDataTable({
   loading,
   error,
   fillScreen = false,
+  debugLogRows = false,
+  formatId: _formatId = null,
 }: MergedDataTableProps) {
   const q = search.trim().toLowerCase();
 
@@ -143,14 +150,16 @@ export function MergedDataTable({
               <th className="sticky left-0 z-20 w-12 min-w-[3rem] border border-gray-300 bg-[#1f6f4a] px-2 py-2 text-center text-xs font-semibold text-white">
                 #
               </th>
-              <th className="border border-gray-300 bg-[#1f6f4a] px-2 py-2 text-center text-xs font-semibold text-white w-20 min-w-[5rem]">
-                Status
+              <th className="border border-gray-300 bg-[#1f6f4a] px-2 py-2 text-center text-xs font-semibold text-white min-w-[9rem] max-w-[11rem]">
+                Original / updated
               </th>
               {columns.map((c, idx) => (
                 <th
                   key={c}
                   className={`border border-gray-300 px-2 py-2 text-left text-xs font-semibold text-white ${
-                    c === SUBMITTED_BY ? 'bg-amber-700 min-w-[140px]' : 'bg-[#1f6f4a] min-w-[100px]'
+                    c === SUBMITTED_BY || c === PICKED_BY
+                      ? 'min-w-[140px] bg-amber-700'
+                      : 'min-w-[100px] bg-[#1f6f4a]'
                   }`}
                 >
                   <span className="mr-1 text-[10px] text-white/70">{colLetter(idx)}</span>
@@ -162,30 +171,53 @@ export function MergedDataTable({
           <tbody>
             {pageIndices.length === 0 ? (
               <tr>
-                <td colSpan={columns.length + 2} className="border border-gray-200 px-4 py-8 text-center text-gray-500">
+                <td
+                  colSpan={columns.length + 2}
+                  className="border border-gray-200 px-4 py-8 text-center text-gray-500"
+                >
                   No rows match your search.
                 </td>
               </tr>
             ) : (
-              pageIndices.map((rowIndex, displayIdx) => {
+              pageIndices.map((rowIndex) => {
                 const row = rows[rowIndex];
+                if (debugLogRows) {
+                  console.log('[MergedDataTable] Row data', { rowIndex, row });
+                }
                 const meta = rowMeta[rowIndex] || { isModified: false, editedBy: '' };
-                const modified = meta.isModified;
+                const hasSave = meta.isModified && Boolean(meta.editedBy?.trim());
+                const pickedLabel = String(row[PICKED_BY] ?? '').trim();
+                const rowTone =
+                  hasSave
+                    ? 'bg-amber-50/90 hover:bg-amber-100/90'
+                    : pickedLabel
+                      ? 'bg-violet-50/70 hover:bg-violet-100/60'
+                      : 'bg-white hover:bg-green-50/40';
                 return (
-                  <tr
-                    key={rowIndex}
-                    className={modified ? 'bg-amber-50/90 hover:bg-amber-100/90' : 'bg-white hover:bg-green-50/40'}
-                  >
+                  <tr key={rowIndex} className={rowTone}>
                     <td className="sticky left-0 z-10 w-12 min-w-[3rem] border border-gray-300 bg-gray-100 px-2 py-1.5 text-center text-xs text-gray-600">
                       {rowIndex + 1}
                     </td>
-                    <td className="border border-gray-300 bg-gray-50 px-2 py-1.5 text-xs">
-                      {modified ? (
-                        <span className="font-medium text-amber-900" title={meta.editedBy || 'Edited'}>
-                          Edited
-                        </span>
+                    <td className="max-w-[11rem] border border-gray-300 bg-gray-50 px-2 py-1.5 align-top text-xs leading-snug">
+                      {hasSave ? (
+                        <div className="space-y-0.5">
+                          <div className="font-semibold text-amber-900">Updated</div>
+                          <div className="break-words text-[11px] font-normal text-gray-800" title={meta.editedBy}>
+                            {meta.editedBy}
+                          </div>
+                        </div>
+                      ) : pickedLabel ? (
+                        <div className="space-y-0.5">
+                          <div className="font-semibold text-violet-900">Taken</div>
+                          <div className="break-words text-[11px] font-normal text-gray-800" title={pickedLabel}>
+                            {pickedLabel}
+                          </div>
+                        </div>
                       ) : (
-                        <span className="text-gray-400">—</span>
+                        <div>
+                          <span className="font-medium text-gray-600">Original</span>
+                          <div className="mt-0.5 text-[10px] font-normal text-gray-400">Not assigned</div>
+                        </div>
                       )}
                     </td>
                     {columns.map((c) => {
@@ -195,7 +227,11 @@ export function MergedDataTable({
                         <td
                           key={c}
                           className={`max-w-[280px] border border-gray-300 px-2 py-1.5 align-top break-words whitespace-pre-wrap ${
-                            c === SUBMITTED_BY && modified ? 'font-medium text-amber-900' : 'text-gray-900'
+                            c === SUBMITTED_BY && hasSave
+                              ? 'font-medium text-amber-900'
+                              : c === PICKED_BY && text
+                                ? 'font-medium text-violet-900'
+                                : 'text-gray-900'
                           }`}
                           title={text}
                         >

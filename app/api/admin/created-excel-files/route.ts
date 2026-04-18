@@ -20,11 +20,16 @@ async function handleGetCreatedExcelFiles(req: AuthenticatedRequest) {
     const rangeEnd = searchParams.get('rangeEnd');
     const formatId = searchParams.get('formatId');
     const isMergedParam = searchParams.get('isMerged');
+    const qFilename = searchParams.get('q')?.trim();
     const limit = parseInt(searchParams.get('limit') || '1000'); // Increased limit to show more files
     const skip = parseInt(searchParams.get('skip') || '0');
 
     // Build query - include all files (both employee-saved and admin-uploaded)
     const query: any = {};
+    if (qFilename) {
+      const esc = qFilename.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      query.originalFilename = new RegExp(esc, 'i');
+    }
     if (labourType && ['OUR_LABOUR', 'SUPPLY_LABOUR', 'SUBCONTRACTOR'].includes(labourType)) {
       query.labourType = labourType;
     }
@@ -50,6 +55,7 @@ async function handleGetCreatedExcelFiles(req: AuthenticatedRequest) {
     const files = await CreatedExcelFile.find(query)
       .select('-fileData') // Don't include file data in list (too large)
       .populate('createdBy', 'name email')
+      .populate('formatId', 'name')
       .sort({ 
         isMerged: 1, // Original files first (false < true)
         createdAt: -1 // Then by date, newest first

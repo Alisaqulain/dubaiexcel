@@ -12,6 +12,26 @@ import * as XLSX from 'xlsx';
 import mongoose from 'mongoose';
 import { emitFormatDailyMergeInvalidate } from '@/lib/unifiedDataSocket';
 
+function isDailyWorkFilename(name: string | undefined): boolean {
+  if (!name) return false;
+  return /_[0-9]{4}-[0-9]{2}-[0-9]{2}\.xlsx$/i.test(String(name).trim());
+}
+
+/** Day-stamped “My data” file — merge uses template row indices; must not drive PickedTemplateRow claims. */
+function isDailyWorkRecord(args: {
+  dailyWorkDate?: string | null;
+  originalFilename?: string | null;
+  uploadFilename?: string | null;
+  incomingDailyYmd?: string | null;
+}): boolean {
+  const ymd =
+    (args.incomingDailyYmd && /^\d{4}-\d{2}-\d{2}$/.test(args.incomingDailyYmd) && args.incomingDailyYmd) ||
+    (args.dailyWorkDate && /^\d{4}-\d{2}-\d{2}$/.test(args.dailyWorkDate) && args.dailyWorkDate) ||
+    '';
+  if (ymd) return true;
+  return isDailyWorkFilename(args.originalFilename || undefined) || isDailyWorkFilename(args.uploadFilename || undefined);
+}
+
 /** Regenerate admin merged outputs that list this file as a source. */
 async function regenerateMergedFilesForSource(args: {
   sourceFileId: string;
@@ -605,11 +625,18 @@ async function handleSaveExcel(req: AuthenticatedRequest) {
       // When updating a pick file, allow updating formatId and pickedTemplateRowIndices (e.g. after "Add data from file")
       const updateFormatId = formData.get('formatId') as string;
       const updateRowIndicesRaw = formData.get('rowIndices') as string;
+      const dailyWorkYmdPut = (formData.get('dailyWorkDate') as string)?.trim();
       const oldPickedIndices = Array.isArray(existingFile.pickedTemplateRowIndices)
         ? [...existingFile.pickedTemplateRowIndices]
         : [];
       const isPickBackedFile = oldPickedIndices.length > 0;
       let newPickedIndices: number[] = oldPickedIndices;
+      const dailyRec = isDailyWorkRecord({
+        dailyWorkDate: existingFile.dailyWorkDate,
+        originalFilename: existingFile.originalFilename,
+        uploadFilename: file.name,
+        incomingDailyYmd: dailyWorkYmdPut || null,
+      });
       if (updateFormatId && mongoose.Types.ObjectId.isValid(updateFormatId)) {
         existingFile.formatId = new mongoose.Types.ObjectId(updateFormatId);
       } else if (!existingFile.formatId) {
@@ -622,9 +649,10 @@ async function handleSaveExcel(req: AuthenticatedRequest) {
           const parsed = JSON.parse(updateRowIndicesRaw);
           if (Array.isArray(parsed)) {
             const parsedArr = parsed.filter((i: number) => typeof i === 'number' && i >= 0);
-            // Only pick-backed files persist template indices. Daily saves also sent rowIndices for
-            // merge hints; storing them turned day files into "picks" and broke My data UI.
-            if (isPickBackedFile) {
+            const countOk = parsedArr.length === rowCount && rowCount > 0;
+            if (countOk && dailyRec) {
+              existingFile.pickedTemplateRowIndices = parsedArr;
+            } else if (countOk && isPickBackedFile && !dailyRec) {
               newPickedIndices = parsedArr;
               existingFile.pickedTemplateRowIndices = newPickedIndices;
             }
@@ -633,14 +661,13 @@ async function handleSaveExcel(req: AuthenticatedRequest) {
           // keep existing
         }
       }
-      const dailyWorkYmdPut = (formData.get('dailyWorkDate') as string)?.trim();
       if (dailyWorkYmdPut && /^\d{4}-\d{2}-\d{2}$/.test(dailyWorkYmdPut)) {
         existingFile.dailyWorkDate = dailyWorkYmdPut;
       }
       await existingFile.save();
 
       // Sync PickedTemplateRow so admin sees who picked each row (claim new rows, release removed rows)
-      if (updateFormatId && isPickBackedFile && newPickedIndices.length >= 0) {
+      if (updateFormatId && isPickBackedFile && newPickedIndices.length >= 0 && !dailyRec) {
         const formatIdObj = new mongoose.Types.ObjectId(updateFormatId);
         const existingPicks = await PickedTemplateRow.find({
           formatId: formatIdObj,
@@ -796,7 +823,8 @@ async function handleSaveExcel(req: AuthenticatedRequest) {
           keeper.fileData = buffer;
           keeper.rowCount = rowCount;
           keeper.dailyWorkDate = dailyWorkDateKey;
-          keeper.pickedTemplateRowIndices = [];
+          keeper.pickedTemplateRowIndices =
+            pickRowIndices.length === rowCount && rowCount > 0 ? pickRowIndices : [];
           keeper.lastEditedAt = new Date();
           keeper.lastEditedBy = userIdObjPost;
           keeper.lastEditedByName = userName;
@@ -846,7 +874,8 @@ async function handleSaveExcel(req: AuthenticatedRequest) {
 
       if (dailyWorkDateKey) {
         createPayload.dailyWorkDate = dailyWorkDateKey;
-        createPayload.pickedTemplateRowIndices = [];
+        createPayload.pickedTemplateRowIndices =
+          pickRowIndices.length === rowCount && rowCount > 0 ? pickRowIndices : [];
       }
 
       const createdFile = await CreatedExcelFile.create(createPayload);

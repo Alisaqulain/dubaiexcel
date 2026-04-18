@@ -3,10 +3,12 @@ import connectDB from '@/lib/mongodb';
 import { withAdmin, AuthenticatedRequest } from '@/lib/middleware';
 import ExcelFormat from '@/models/ExcelFormat';
 import FormatTemplateData from '@/models/FormatTemplateData';
+import PickedTemplateRow from '@/models/PickedTemplateRow';
 import {
   parseDayRangeUtc,
   parseClientDayRangeIso,
   mergeAdminTemplateDailyMerge,
+  applyPickedByToAdminMerge,
   loadCreatedFilesForFormatAndDay,
   buildMergeXlsxBuffer,
 } from '@/lib/formatDailyMerge';
@@ -48,14 +50,26 @@ async function handleGet(req: AuthenticatedRequest) {
     }
 
     const formatIdObj = new mongoose.Types.ObjectId(formatId);
-    const [docs, templateData] = await Promise.all([
-      loadCreatedFilesForFormatAndDay(formatIdObj, range.start, range.end),
+    const [docs, templateData, pickDocs] = await Promise.all([
+      loadCreatedFilesForFormatAndDay(formatIdObj, range.start, range.end, date),
       FormatTemplateData.findOne({ formatId: formatIdObj }).lean(),
+      PickedTemplateRow.find({ formatId: formatIdObj }).select('rowIndex empName empId').lean(),
     ]);
-    const { rows, columnOrder } = mergeAdminTemplateDailyMerge(
+    const mergeResult = mergeAdminTemplateDailyMerge(
       (fmt as { columns?: { name: string; order?: number }[] }).columns,
       templateData?.rows as unknown[] | undefined,
       docs as any[]
+    );
+    const picksForMerge = (pickDocs as { rowIndex?: number; empName?: string; empId?: string }[]).map((p) => ({
+      rowIndex: Number(p.rowIndex),
+      empName: p.empName,
+      empId: p.empId,
+    }));
+    const { rows, columnOrder } = applyPickedByToAdminMerge(
+      mergeResult.rows,
+      mergeResult.columnOrder,
+      mergeResult.rowStorageIndices,
+      picksForMerge
     );
 
     if (download) {

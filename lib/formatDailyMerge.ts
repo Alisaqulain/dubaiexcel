@@ -4,6 +4,8 @@ import CreatedExcelFile from '@/models/CreatedExcelFile';
 import { isTemplateRowDeleted, TEMPLATE_ROW_INDEX } from '@/lib/formatTemplateRows';
 
 export const SUBMITTED_BY_COL = 'Submitted by';
+/** Who claimed the template row (Format view / pick); not overwritten by save overlay. */
+export const PICKED_BY_COL = 'Picked by';
 /** Employee’s saved .xlsx display name (same workbook for every row from that file). */
 export const SAVED_AT_COL = 'Saved at (file)';
 export const LAST_SAVED_COL = 'Last saved';
@@ -16,35 +18,141 @@ function normId(s: string): string {
   return s.trim().toLowerCase();
 }
 
+/** Strip leading Excel column letters from export headers, e.g. "C EMP ID" → "EMP ID". */
+function stripLeadingColumnLetters(header: string): string {
+  return header.trim().replace(/^[A-Za-z]{1,2}\s+/, '');
+}
+
+/**
+ * Same header identity across "EMP ID", "Emp ID", "C EMP ID" (used for merge + id lookup).
+ */
+export function normHeaderKey(header: string): string {
+  return stripLeadingColumnLetters(header)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function mapParsedSourceKeyToCanonicalColumn(parsedKey: string, namedCols: string[]): string | null {
+  const pn = normHeaderKey(parsedKey);
+  if (!pn) return null;
+  for (const col of namedCols) {
+    if (normHeaderKey(col) === pn) return col;
+  }
+  return null;
+}
+
+/**
+ * Value from parsed row for a template column name, matching any export header synonym
+ * ("B COMPANY" → same as "COMPANY").
+ */
+function resolveParsedValueForTemplateColumn(
+  pr: Record<string, unknown>,
+  templateColumnKey: string
+): unknown | undefined {
+  const want = normHeaderKey(templateColumnKey);
+  if (!want) return undefined;
+  for (const [k, val] of Object.entries(pr)) {
+    if (k.startsWith('_')) continue;
+    if (normHeaderKey(k) === want) return val;
+  }
+  return undefined;
+}
+
+/**
+ * Copy cells from a parsed workbook row onto a template merge row using format column names.
+ * Fixes exports where headers include column letters ("C EMP ID") so values land in "EMP ID".
+ * Second pass: for every cell already on the template row, pull from pr by normalized header so
+ * columns missing from `namedCols` still update (avoids leaving MBM / 03831 while other fields merged).
+ */
+function copyParsedRowOntoTarget(
+  target: Record<string, unknown>,
+  pr: Record<string, unknown>,
+  namedCols: string[],
+  tail: readonly string[]
+) {
+  for (const col of Object.keys(pr)) {
+    if (col.startsWith('_')) continue;
+    if (tail.includes(col as string)) continue;
+    if (!Object.prototype.hasOwnProperty.call(pr, col)) continue;
+    const canonical = mapParsedSourceKeyToCanonicalColumn(col, namedCols);
+    if (canonical) {
+      target[canonical] = pr[col];
+    } else {
+      target[col] = pr[col];
+    }
+  }
+
+  for (const tk of Object.keys(target)) {
+    if (tk.startsWith('_')) continue;
+    if (tail.includes(tk)) continue;
+    const resolved = resolveParsedValueForTemplateColumn(pr, tk);
+    if (resolved !== undefined) {
+      target[tk] = resolved;
+    }
+  }
+}
+
 /**
  * Read employee / row id from a sheet row (handles header spelling variants).
  * Used so admin merge updates the correct template row when pick indices are wrong or missing.
+ * Prefers a true "EMP ID" / "Employee ID" column over "EMP NO" so short codes do not win over edited IDs.
  */
 export function getEmpIdFromRow(row: Record<string, unknown> | undefined | null): string {
   if (!row || typeof row !== 'object') return '';
+  let fallback = '';
   for (const [k, v] of Object.entries(row)) {
     if (k.startsWith('_')) continue;
-    const nk = k
-      .trim()
-      .toLowerCase()
-      // treat punctuation as separators: "EMP. ID", "EMP#"
-      .replace(/[^a-z0-9]+/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
+    const nk = normHeaderKey(k);
+    if (nk === 'emp id' || nk === 'employee id' || nk === 'empid') {
+      return String(v ?? '').trim();
+    }
     if (
-      nk === 'emp id' ||
-      nk === 'employee id' ||
-      nk === 'empid' ||
       nk === 'emp no' ||
       nk === 'employee no' ||
       nk === 'employee number' ||
       nk === 'emp code' ||
       nk === 'employee code'
     ) {
-      return String(v ?? '').trim();
+      if (!fallback) fallback = String(v ?? '').trim();
+    }
+  }
+  return fallback;
+}
+
+/** Stable row matcher for format sheets (e.g. S.NO / SR NO). */
+function getSerialNoFromRow(row: Record<string, unknown> | undefined | null): string {
+  if (!row || typeof row !== 'object') return '';
+  for (const [k, v] of Object.entries(row)) {
+    if (k.startsWith('_')) continue;
+    const nk = normHeaderKey(k);
+    if (
+      nk === 's no' ||
+      nk === 's.no' ||
+      nk === 'sr no' ||
+      nk === 'serial no' ||
+      nk === 'serial number'
+    ) {
+      const out = String(v ?? '').trim();
+      if (out) return out;
     }
   }
   return '';
+}
+
+function findMergedIndexBySerialNo(
+  merged: Record<string, unknown>[],
+  serial: string,
+  skip?: Set<number>
+): number {
+  if (!serial) return -1;
+  const want = normId(serial);
+  return merged.findIndex((m, idx) => {
+    if (skip?.has(idx)) return false;
+    const has = normId(getSerialNoFromRow(m));
+    return has.length > 0 && has === want;
+  });
 }
 
 function findMergedIndexByEmpId(
@@ -245,21 +353,44 @@ export function mergeDailyFileRows(
 export async function loadCreatedFilesForFormatAndDay(
   formatIdObj: mongoose.Types.ObjectId,
   start: Date,
-  end: Date
+  end: Date,
+  /** YYYY-MM-DD — include “My data” / daily saves whose workday is this date even if lastEditedAt falls outside the range. */
+  calendarYmd?: string | null
 ) {
-  return CreatedExcelFile.find({
+  const orClause: Record<string, unknown>[] = [
+    { lastEditedAt: { $gte: start, $lte: end } },
+    { updatedAt: { $gte: start, $lte: end } },
+    { createdAt: { $gte: start, $lte: end } },
+  ];
+  if (calendarYmd && /^\d{4}-\d{2}-\d{2}$/.test(calendarYmd)) {
+    orClause.push({ dailyWorkDate: calendarYmd });
+    orClause.push({
+      originalFilename: new RegExp(`_${calendarYmd.replace(/-/g, '\\-')}\\.xlsx$`, 'i'),
+    });
+  }
+
+  const docs = await CreatedExcelFile.find({
     formatId: formatIdObj,
     isMerged: { $ne: true },
-    $or: [
-      { lastEditedAt: { $gte: start, $lte: end } },
-      { updatedAt: { $gte: start, $lte: end } },
-      { createdAt: { $gte: start, $lte: end } },
-    ],
+    $or: orClause,
   })
     .select(
-      '+fileData createdByName createdByEmail originalFilename lastEditedAt updatedAt createdAt pickedTemplateRowIndices'
+      '+fileData createdByName createdByEmail originalFilename lastEditedAt updatedAt createdAt pickedTemplateRowIndices dailyWorkDate'
     )
     .lean();
+
+  if (!(calendarYmd && /^\d{4}-\d{2}-\d{2}$/.test(calendarYmd))) {
+    return docs;
+  }
+
+  // Admin "All merge data" for a selected day should only use day-stamped saves for that same day.
+  // Timestamp-only filtering can pull non-day pick snapshots and overwrite edited day values.
+  const daySuffixRe = new RegExp(`_${calendarYmd.replace(/-/g, '\\-')}\\.xlsx$`, 'i');
+  return (docs as Array<Record<string, unknown>>).filter((d) => {
+    const dailyWorkDate = String(d.dailyWorkDate ?? '').trim();
+    const originalFilename = String(d.originalFilename ?? '').trim();
+    return dailyWorkDate === calendarYmd || daySuffixRe.test(originalFilename);
+  });
 }
 
 type AdminMergeFile = {
@@ -280,11 +411,47 @@ type AdminMergeFile = {
  * then overlay cells from each saved file for the day when `pickedTemplateRowIndices` lines up with parsed rows.
  * Files that are not pick-shaped are appended below. Matches how format-view shows complete Excel + live edits.
  */
+export type TemplatePickForMerge = { rowIndex: number; empName?: string; empId?: string };
+
+/**
+ * Add {@link PICKED_BY_COL} from template-row picks (storage index in FormatTemplateData.rows).
+ */
+export function applyPickedByToAdminMerge(
+  rows: Record<string, unknown>[],
+  columnOrder: string[],
+  rowStorageIndices: (number | null)[],
+  picks: TemplatePickForMerge[]
+): { rows: Record<string, unknown>[]; columnOrder: string[] } {
+  const labelByStorage = new Map<number, string>();
+  for (const p of picks) {
+    if (typeof p.rowIndex !== 'number' || !Number.isInteger(p.rowIndex) || p.rowIndex < 0) continue;
+    const name = String(p.empName ?? '').trim() || 'Unknown';
+    const id = String(p.empId ?? '').trim();
+    const label = id ? `${name} (${id})` : name;
+    labelByStorage.set(p.rowIndex, label);
+  }
+
+  const nextRows = rows.map((row, i) => {
+    const si = rowStorageIndices[i];
+    const label = si != null ? labelByStorage.get(si) : undefined;
+    return { ...row, [PICKED_BY_COL]: label ?? '' };
+  });
+
+  const without = columnOrder.filter((c) => c !== PICKED_BY_COL);
+  const submitIdx = without.indexOf(SUBMITTED_BY_COL);
+  const nextOrder =
+    submitIdx >= 0
+      ? [...without.slice(0, submitIdx), PICKED_BY_COL, ...without.slice(submitIdx)]
+      : [...without, PICKED_BY_COL];
+
+  return { rows: nextRows, columnOrder: nextOrder };
+}
+
 export function mergeAdminTemplateDailyMerge(
   formatColumns: Array<{ name: string; order?: number }> | undefined,
   templateRows: unknown[] | null | undefined,
   files: AdminMergeFile[]
-): { rows: Record<string, unknown>[]; columnOrder: string[] } {
+): { rows: Record<string, unknown>[]; columnOrder: string[]; rowStorageIndices: (number | null)[] } {
   const namedCols = [...(formatColumns || [])]
     .sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
     .map((c) => c.name)
@@ -298,7 +465,11 @@ export function mergeAdminTemplateDailyMerge(
   });
 
   if (activeStorageIndices.length === 0) {
-    return mergeDailyFileRows(files as any[]);
+    const r = mergeDailyFileRows(files as any[]);
+    return {
+      ...r,
+      rowStorageIndices: r.rows.map(() => null as number | null),
+    };
   }
 
   const storageToMergedIdx = new Map<number, number>();
@@ -367,22 +538,48 @@ export function mergeAdminTemplateDailyMerge(
       for (let i = 0; i < pairCount; i++) {
         const si = indices[i];
         const pr = parsed[i];
-        const pe = getEmpIdFromRow(pr);
-        let mj: number | undefined;
-        if (pe) {
-          const jEmp = findMergedIndexByEmpId(merged, pe);
-          if (jEmp >= 0) mj = jEmp;
-        }
-        if (mj === undefined) mj = storageToMergedIdx.get(si);
-        if (mj === undefined) continue;
-        const target = merged[mj];
-        for (const col of Object.keys(pr)) {
-          if (col.startsWith('_')) continue;
-          if (tail.includes(col as any)) continue;
-          if (Object.prototype.hasOwnProperty.call(pr, col)) {
-            target[col] = pr[col];
+        // Trust pick file row order ↔ template indices first. EMP-ID routing breaks when the
+        // employee edits EMP ID (new id no longer matches the template row) or when multiple
+        // "emp*" columns disagree (e.g. EMP NO vs EMP ID).
+        let mj: number | undefined = storageToMergedIdx.get(si);
+        if (mj === undefined && typeof si === 'number' && si >= 0 && si < fullRows.length) {
+          const tpl = fullRows[si] as Record<string, unknown>;
+          if (!isTemplateRowDeleted(tpl)) {
+            const serialTpl = getSerialNoFromRow(tpl);
+            if (serialTpl) {
+              const jSerial = findMergedIndexBySerialNo(merged, serialTpl);
+              if (jSerial >= 0) mj = jSerial;
+            }
+            const origEmp = getEmpIdFromRow(tpl);
+            if (mj === undefined && origEmp) {
+              const jEmp = findMergedIndexByEmpId(merged, origEmp);
+              if (jEmp >= 0) mj = jEmp;
+            }
           }
         }
+        if (mj === undefined) {
+          const sNo = getSerialNoFromRow(pr);
+          if (sNo) {
+            const jSerial = findMergedIndexBySerialNo(merged, sNo);
+            if (jSerial >= 0) mj = jSerial;
+          }
+        }
+        if (mj === undefined) {
+          const pe = getEmpIdFromRow(pr);
+          if (pe) {
+            const jEmp = findMergedIndexByEmpId(merged, pe);
+            if (jEmp >= 0) mj = jEmp;
+          }
+        }
+        if (mj === undefined) {
+          console.warn(
+            '[mergeAdminTemplateDailyMerge] skipped overlay: no merged row for pick index',
+            { fileId: idStr, pickStorageIndex: si, rowInFile: i }
+          );
+          continue;
+        }
+        const target = merged[mj];
+        copyParsedRowOntoTarget(target, pr, namedCols, tail);
         target[SUBMITTED_BY_COL] = who;
         target[SAVED_AT_COL] = displayName;
         target[LAST_SAVED_COL] = savedAt;
@@ -407,13 +604,7 @@ export function mergeAdminTemplateDailyMerge(
       const usedMerged = new Set<number>();
       const overlayOnto = (mj: number, pr: Record<string, unknown>) => {
         const target = merged[mj];
-        for (const col of Object.keys(pr)) {
-          if (col.startsWith('_')) continue;
-          if (tail.includes(col as any)) continue;
-          if (Object.prototype.hasOwnProperty.call(pr, col)) {
-            target[col] = pr[col];
-          }
-        }
+        copyParsedRowOntoTarget(target, pr, namedCols, tail);
         target[SUBMITTED_BY_COL] = who;
         target[SAVED_AT_COL] = displayName;
         target[LAST_SAVED_COL] = savedAt;
@@ -423,6 +614,14 @@ export function mergeAdminTemplateDailyMerge(
 
       const unmatched: Record<string, unknown>[] = [];
       for (const pr of parsed) {
+        const sNo = getSerialNoFromRow(pr);
+        if (sNo) {
+          const jBySerial = findMergedIndexBySerialNo(merged, sNo, usedMerged);
+          if (jBySerial >= 0) {
+            overlayOnto(jBySerial, pr);
+            continue;
+          }
+        }
         const pe = getEmpIdFromRow(pr);
         if (pe) {
           const j = findMergedIndexByEmpId(merged, pe, usedMerged);
@@ -487,7 +686,12 @@ export function mergeAdminTemplateDailyMerge(
   const rest = Array.from(keySet).sort();
   const columnOrder = [...fromFormat, ...rest, ...tail];
 
-  return { rows: allMerged, columnOrder };
+  const rowStorageIndices: (number | null)[] = [
+    ...activeStorageIndices,
+    ...appendRows.map(() => null as number | null),
+  ];
+
+  return { rows: allMerged, columnOrder, rowStorageIndices };
 }
 
 export function buildMergeXlsxBuffer(

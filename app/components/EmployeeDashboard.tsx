@@ -43,6 +43,23 @@ function dayStampFromDailyFilename(name: string | undefined): string | null {
   return m ? m[1] : null;
 }
 
+/** YYYY-MM-DD from my_pick_YYYY-MM-DD_HH-MM-SS.xlsx */
+function pickSessionYmdFromFilename(name: string | undefined): string | null {
+  if (!name) return null;
+  const m = name.trim().match(/^my_pick_([0-9]{4}-[0-9]{2}-[0-9]{2})_/i);
+  return m ? m[1] : null;
+}
+
+function formatYmdForDisplay(ymd: string): string {
+  const [y, mo, d] = ymd.split('-').map((x) => parseInt(x, 10));
+  if (!y || !mo || !d) return ymd;
+  return new Date(y, mo - 1, d).toLocaleDateString();
+}
+
+function fileCalendarWorkDay(f: CreatedFile): string {
+  return f.dailyWorkDate || dayStampFromDailyFilename(f.originalFilename) || fileLocalYmd(f);
+}
+
 function hasPickRowIndices(f: CreatedFile): boolean {
   return !!(f.formatId && Array.isArray(f.pickedTemplateRowIndices) && f.pickedTemplateRowIndices.length > 0);
 }
@@ -166,8 +183,7 @@ export default function EmployeeDashboard() {
     });
     const byKey = new Map<string, CreatedFile>();
     for (const f of candidates) {
-      const dayKey =
-        f.dailyWorkDate || dayStampFromDailyFilename(f.originalFilename) || fileLocalYmd(f);
+      const dayKey = fileCalendarWorkDay(f);
       const fmt = f.formatId || '_';
       const key = `${fmt}:${dayKey}`;
       const prev = byKey.get(key);
@@ -582,7 +598,9 @@ export default function EmployeeDashboard() {
             </div>
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
-              {pickSavedFiles.map((file) => (
+              {pickSavedFiles.map((file) => {
+                const pickSessionYmd = pickSessionYmdFromFilename(file.originalFilename);
+                return (
                 <div
                   key={file._id}
                   className="border-2 border-emerald-200 rounded-xl p-6 bg-emerald-50/60 hover:shadow-lg hover:border-emerald-300 transition-all"
@@ -594,7 +612,17 @@ export default function EmployeeDashboard() {
                     </h3>
                     <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
                       <span className="bg-white/80 px-2 py-1 rounded border border-emerald-200">{file.rowCount} rows</span>
-                      <span className="text-gray-500">{new Date(file.createdAt).toLocaleDateString()}</span>
+                      <span className="text-gray-500" title="Latest change to this pick record">
+                        Updated{' '}
+                        {new Date(
+                          file.lastEditedAt || file.updatedAt || file.createdAt
+                        ).toLocaleDateString()}
+                      </span>
+                      {pickSessionYmd && (
+                        <span className="text-gray-500" title="Date embedded in pick filename when you saved">
+                          Pick session {formatYmdForDisplay(pickSessionYmd)}
+                        </span>
+                      )}
                     </div>
                   </div>
                   <button
@@ -604,7 +632,8 @@ export default function EmployeeDashboard() {
                     ✏️ Work with this
                   </button>
                 </div>
-              ))}
+              );
+              })}
             </div>
           )}
         </div>
@@ -636,6 +665,9 @@ export default function EmployeeDashboard() {
                     <h3 className="font-semibold text-gray-900 break-words mb-2">{file.originalFilename}</h3>
                     <div className="text-xs text-gray-500 mb-3 space-y-1">
                       <div>{file.rowCount} rows</div>
+                      <div className="font-medium text-slate-700">
+                        Work day (calendar): {formatYmdForDisplay(fileCalendarWorkDay(file))}
+                      </div>
                       <div>
                         Last updated:{' '}
                         {new Date(file.lastEditedAt || file.updatedAt || file.createdAt).toLocaleString()}

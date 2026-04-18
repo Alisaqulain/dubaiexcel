@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import Link from 'next/link';
 import { ProtectedRoute } from '../../components/ProtectedRoute';
 import Navigation from '../../components/Navigation';
@@ -8,6 +8,7 @@ import { useAuth } from '../../context/AuthContext';
 import { AdminDatePicker } from './components/AdminDatePicker';
 import { FormatListPanel, type FormatListItem } from './components/FormatListPanel';
 import { MergedDataTable, type RowMeta } from './components/MergedDataTable';
+import { io, type Socket } from 'socket.io-client';
 
 function localDayRangeParams(ymd: string): { rangeStart: string; rangeEnd: string } {
   const [y, m, d] = ymd.split('-').map(Number);
@@ -55,6 +56,22 @@ function AllMergeDataDashboard() {
   const [tableSearch, setTableSearch] = useState('');
   const [page, setPage] = useState(0);
   const PAGE_SIZE = 50;
+  const [tableDebug, setTableDebug] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    setTableDebug(window.localStorage.getItem('adminTableDebug') === '1');
+  }, []);
+
+  useEffect(() => {
+    if (!tableDebug || rows.length === 0) return;
+    console.log('[admin all-merge-data] Full table data', {
+      columns,
+      rowCount: rows.length,
+      rows,
+      rowMeta,
+    });
+  }, [tableDebug, rows, columns, rowMeta]);
 
   const loadFormats = useCallback(async () => {
     if (!token) return;
@@ -111,6 +128,13 @@ function AllMergeDataDashboard() {
           rangeStart: dayRange.rangeStart,
           rangeEnd: dayRange.rangeEnd,
         });
+        const debugMerge =
+          typeof window !== 'undefined' &&
+          (window.localStorage.getItem('adminMergeDebug') === '1' ||
+            new URLSearchParams(window.location.search).get('debugMerge') === '1');
+        if (debugMerge) {
+          q.set('debugMerge', '1');
+        }
         const res = await fetch(`/api/admin/merged-data?${q}`, {
           headers: { Authorization: `Bearer ${token}` },
           cache: 'no-store',
@@ -120,6 +144,19 @@ function AllMergeDataDashboard() {
           throw new Error(json.error || 'Failed to load merged data');
         }
         const d = json.data;
+        if (d.debug) {
+          console.log('[admin all-merge-data] merge debug', d.debug);
+          if (debugMerge) {
+            const missingIdx = Number(d.debug.dailyFilesMissingPickIndices) || 0;
+            window.alert(
+              `Merge debug (see console for full JSON)\n\n` +
+                `Files loaded: ${Number(d.debug.fileCount) || 0}\n` +
+                `Rows with file overlay (Submitted by): ${Number(d.debug.rowsWithSaveOverlay) || 0} / ${Number(d.debug.rowCount) || 0}\n` +
+                `Day files missing template row index (show master until re-saved): ${missingIdx}\n\n` +
+                `Tip: ?debugMerge=1 on URL or localStorage adminMergeDebug=1`
+            );
+          }
+        }
         setColumns(Array.isArray(d.columns) ? d.columns : []);
         setRows(Array.isArray(d.rows) ? d.rows : []);
         setRowMeta(Array.isArray(d.rowMeta) ? d.rowMeta : []);
@@ -140,6 +177,73 @@ function AllMergeDataDashboard() {
     },
     [token, date, dayRange.rangeStart, dayRange.rangeEnd]
   );
+
+  const loadMergedRef = useRef(loadMerged);
+  loadMergedRef.current = loadMerged;
+  const selectedFormatIdRef = useRef(selectedFormatId);
+  selectedFormatIdRef.current = selectedFormatId;
+
+  // Live refresh when employees save files (server emits Socket.IO event).
+  // Defer connect to the next macrotask so React 18 Strict Mode’s immediate cleanup
+  // clears the timer and never opens a socket on the “throwaway” mount — avoids
+  // “WebSocket is closed before the connection is established” in dev.
+  useEffect(() => {
+    if (!token) return;
+
+    const url =
+      typeof window !== 'undefined'
+        ? process.env.NEXT_PUBLIC_APP_ORIGIN || window.location.origin
+        : '';
+
+    const debugAlerts =
+      typeof window !== 'undefined' && window.localStorage.getItem('adminMergeDebug') === '1';
+
+    let socket: Socket | null = null;
+    let cancelled = false;
+    const scheduleId = window.setTimeout(() => {
+      if (cancelled) return;
+      socket = io(url, {
+        path: '/socket.io',
+        auth: { token },
+        transports: ['websocket', 'polling'],
+      });
+
+      const onInvalidate = (payload: unknown) => {
+        const formatId = (payload as { formatId?: string })?.formatId;
+        console.log('[admin all-merge-data] format_daily_merge_invalidate', payload);
+
+        if (debugAlerts) {
+          alert(`merge invalidate: formatId=${String(formatId ?? '')}`);
+        }
+
+        if (!formatId || typeof formatId !== 'string') return;
+        const sel = selectedFormatIdRef.current;
+        if (!sel || formatId !== sel) return;
+        void loadMergedRef.current(sel);
+      };
+
+      socket.on('connect', () => {
+        console.log('[admin all-merge-data] socket connected', socket?.id);
+      });
+      socket.on('connect_error', (err) => {
+        console.warn('[admin all-merge-data] socket connect_error', err);
+      });
+      socket.on('disconnect', (reason) => {
+        console.log('[admin all-merge-data] socket disconnected', reason);
+      });
+      socket.on('format_daily_merge_invalidate', onInvalidate);
+    }, 0);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(scheduleId);
+      if (socket) {
+        socket.removeAllListeners();
+        socket.disconnect();
+        socket = null;
+      }
+    };
+  }, [token]);
 
   const onSelectFormat = useCallback((f: FormatListItem) => {
     setSelectedFormatId(f.id);
@@ -195,7 +299,9 @@ function AllMergeDataDashboard() {
         <div>
           <h1 className="text-lg font-bold text-gray-900">All merge data</h1>
           <p className="hidden text-xs text-gray-600 sm:block">
-            Date + format → full sheet. Edits that day in amber.{' '}
+            Date + format → full sheet. Picked by matches Format view; violet rows are taken without a save that day;
+            amber means a file overlay. The first column summarizes status (set{' '}
+            <code className="rounded bg-gray-100 px-0.5">localStorage adminTableDebug=1</code> for full-table logs).{' '}
             <Link href="/admin/excel-formats" className="font-medium text-blue-700 hover:underline">
               Manage formats
             </Link>
@@ -265,6 +371,8 @@ function AllMergeDataDashboard() {
               loading={mergeLoading}
               error={mergeError}
               fillScreen
+              formatId={selectedFormatId}
+              debugLogRows={tableDebug}
             />
           </div>
         </section>

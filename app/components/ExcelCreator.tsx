@@ -839,7 +839,7 @@ export default function ExcelCreator({
   const appendFormatPickMetaToFormData = (
     formData: FormData,
     explicitPutId?: string | null,
-    options?: { omitRowIndices?: boolean }
+    options?: { omitRowIndices?: boolean; allowIndicesOnCreate?: boolean }
   ) => {
     let fid: string | null;
     if (explicitPutId === undefined) {
@@ -852,7 +852,8 @@ export default function ExcelCreator({
     }
     if (!useCustomFormat || !formatId) return;
     formData.append('formatId', formatId);
-    if (!fid) return;
+    /** POST create has no fileId; daily saves still need rowIndices for admin merge. */
+    if (!fid && !options?.allowIndicesOnCreate) return;
     if (options?.omitRowIndices) return;
     const fromTemplateMeta = rows.map((r) => getPickTemplateRowIndex(r));
     let indicesForSave: number[] | null = null;
@@ -980,13 +981,12 @@ export default function ExcelCreator({
     if (myDataDailySave?.dailyWorkYmd) {
       formData.append('dailyWorkDate', myDataDailySave.dailyWorkYmd);
     }
-    // Always attach rowIndices when we can derive them (pick / template-linked rows).
-    // "My data" daily save used to omit them, which broke admin merge overlay — server merge now also
-    // falls back to positional overlay, but sending indices when known is still best.
+    // Send template rowIndices for daily saves so admin merge maps each file row to the correct
+    // template storage index (EMP ID and other fields may be edited and no longer match master).
     appendFormatPickMetaToFormData(
       formData,
       putFileId,
-      myDataDailySave ? { omitRowIndices: true } : undefined
+      myDataDailySave ? { allowIndicesOnCreate: true } : undefined
     );
 
     const response = await fetch('/api/employee/save-excel', {

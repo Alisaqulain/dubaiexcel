@@ -61,7 +61,7 @@ async function handleGet(req: AuthenticatedRequest) {
     }
 
     const formatIdObj = new mongoose.Types.ObjectId(formatId);
-    const docs = await loadCreatedFilesForFormatAndDay(formatIdObj, range.start, range.end);
+    const docs = await loadCreatedFilesForFormatAndDay(formatIdObj, range.start, range.end, date);
     const { rows, columnOrder } = mergeDailyFileRows(docs as any[], {
       includeSourceFileIds: false,
     });
