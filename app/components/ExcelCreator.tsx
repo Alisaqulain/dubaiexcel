@@ -1114,6 +1114,7 @@ export default function ExcelCreator({
         await runServerSave({
           putFileId: myDataDailySave.putTargetId,
           filename: myDataDailySave.defaultFilename,
+          closeAfter: true,
         });
         return;
       }

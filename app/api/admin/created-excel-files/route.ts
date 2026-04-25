@@ -20,6 +20,7 @@ async function handleGetCreatedExcelFiles(req: AuthenticatedRequest) {
     const rangeEnd = searchParams.get('rangeEnd');
     const formatId = searchParams.get('formatId');
     const isMergedParam = searchParams.get('isMerged');
+    const cleanParam = searchParams.get('clean');
     const qFilename = searchParams.get('q')?.trim();
     const limit = parseInt(searchParams.get('limit') || '1000'); // Increased limit to show more files
     const skip = parseInt(searchParams.get('skip') || '0');
@@ -38,6 +39,18 @@ async function handleGetCreatedExcelFiles(req: AuthenticatedRequest) {
     }
     if (isMergedParam === 'true') query.isMerged = true;
     if (isMergedParam === 'false') query.isMerged = false;
+    const cleanOnly = cleanParam === '1' || cleanParam === 'true';
+    if (cleanOnly && isMergedParam === 'false') {
+      // Clean list: only day-save files, exclude pick snapshots.
+      if (!query.$and) query.$and = [];
+      query.$and.push({ originalFilename: { $not: /^my_pick_/i } });
+      query.$and.push({
+        $or: [
+          { dailyWorkDate: { $regex: /^\d{4}-\d{2}-\d{2}$/ } },
+          { originalFilename: /_[0-9]{4}-[0-9]{2}-[0-9]{2}\.xlsx$/i },
+        ],
+      });
+    }
     if (rangeStart || rangeEnd) {
       const createdAt: any = {};
       if (rangeStart) {
@@ -135,13 +148,47 @@ async function handleGetCreatedExcelFiles(req: AuthenticatedRequest) {
       return file;
     }));
 
+    const dayFromFilename = (name: string): string => {
+      const m = String(name || '').match(/_([0-9]{4}-[0-9]{2}-[0-9]{2})\.xlsx$/i);
+      return m ? m[1] : '';
+    };
+    const toTs = (f: any): number =>
+      new Date(f.lastEditedAt || f.updatedAt || f.createdAt || 0).getTime();
+
+    // Clean mode: one latest file per owner+format+work-day.
+    const outputFiles = cleanOnly
+      ? (() => {
+          const latest = new Map<string, any>();
+          for (const f of enhancedFiles as any[]) {
+            const ownerId =
+              (f.createdBy && typeof f.createdBy === 'object' && String(f.createdBy._id || '').trim()) ||
+              String(f.createdBy || '').trim() ||
+              String(f.createdByEmail || '').trim() ||
+              'unknown';
+            const fmtId =
+              (f.formatId && typeof f.formatId === 'object' && String(f.formatId._id || '').trim()) ||
+              String(f.formatId || '').trim() ||
+              'no-format';
+            const day =
+              String(f.dailyWorkDate || '').trim() ||
+              dayFromFilename(String(f.originalFilename || '')) ||
+              '';
+            if (!day) continue;
+            const key = `${ownerId}|${fmtId}|${day}`;
+            const prev = latest.get(key);
+            if (!prev || toTs(f) >= toTs(prev)) latest.set(key, f);
+          }
+          return Array.from(latest.values()).sort((a, b) => toTs(b) - toTs(a));
+        })()
+      : enhancedFiles;
+
     // Get total count
     const total = await CreatedExcelFile.countDocuments(query);
 
     return NextResponse.json({
       success: true,
-      data: enhancedFiles,
-      total,
+      data: outputFiles,
+      total: cleanOnly ? outputFiles.length : total,
       limit,
       skip,
     });

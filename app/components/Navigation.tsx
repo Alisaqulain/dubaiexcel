@@ -78,16 +78,6 @@ export default function Navigation() {
           
             {(user.role === 'super-admin' || user.role === 'admin') && (
               <Link
-                href="/admin/all-merge-data"
-                className={`flex items-center px-3 py-2 rounded-md text-sm font-medium ${
-                  isActive('/admin/all-merge-data') ? 'bg-blue-800' : 'hover:bg-blue-700'
-                }`}
-              >
-                All merge data
-              </Link>
-            )}
-            {(user.role === 'super-admin' || user.role === 'admin') && (
-              <Link
                 href="/admin/user-saved-files"
                 className={`flex items-center px-3 py-2 rounded-md text-sm font-medium ${
                   isActive('/admin/user-saved-files') ? 'bg-blue-800' : 'hover:bg-blue-700'

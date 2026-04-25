@@ -390,13 +390,30 @@ export async function loadCreatedFilesForFormatAndDay(
     return docs;
   }
 
-  // Admin "All merge data" for a selected day should only use day-stamped saves for that same day.
-  // Timestamp-only filtering can pull non-day pick snapshots and overwrite edited day values.
+  // Prefer explicit day markers (dailyWorkDate / YYYY-MM-DD filename suffix) for accuracy.
+  // Some legacy saves may miss these markers; in that case, fall back to same-day timestamp docs
+  // while excluding pick snapshots so they do not overwrite daily work saves.
   const daySuffixRe = new RegExp(`_${calendarYmd.replace(/-/g, '\\-')}\\.xlsx$`, 'i');
-  return (docs as Array<Record<string, unknown>>).filter((d) => {
+  const allDocs = docs as Array<Record<string, unknown>>;
+  const dayTagged = allDocs.filter((d) => {
     const dailyWorkDate = String(d.dailyWorkDate ?? '').trim();
     const originalFilename = String(d.originalFilename ?? '').trim();
     return dailyWorkDate === calendarYmd || daySuffixRe.test(originalFilename);
+  });
+
+  if (dayTagged.length > 0) {
+    return dayTagged;
+  }
+
+  return allDocs.filter((d) => {
+    const originalFilename = String(d.originalFilename ?? '').trim();
+    const isPickSnapshot = /^my_pick_/i.test(originalFilename);
+    if (isPickSnapshot) return false;
+    const pickIndices = Array.isArray(d.pickedTemplateRowIndices)
+      ? (d.pickedTemplateRowIndices as unknown[])
+      : [];
+    // If no explicit day markers exist, avoid using pick-backed snapshots as day files.
+    return pickIndices.length === 0;
   });
 }
 
