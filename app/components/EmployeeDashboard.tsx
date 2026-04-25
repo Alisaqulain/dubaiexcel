@@ -162,7 +162,7 @@ export default function EmployeeDashboard() {
     );
     const byKey = new Map<string, CreatedFile>();
     for (const f of picks) {
-      const key = `${f.formatId}:${JSON.stringify([...(f.pickedTemplateRowIndices || [])].sort((a, b) => a - b))}`;
+      const key = String(f.formatId || '_');
       const prev = byKey.get(key);
       const tNew = new Date(f.updatedAt || f.lastEditedAt || f.createdAt).getTime();
       const tPrev = prev ? new Date(prev.updatedAt || prev.lastEditedAt || prev.createdAt).getTime() : -1;

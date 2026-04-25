@@ -878,6 +878,70 @@ async function handleSaveExcel(req: AuthenticatedRequest) {
           pickRowIndices.length === rowCount && rowCount > 0 ? pickRowIndices : [];
       }
 
+      // Keep only one active pick file per user+format: update newest existing pick instead of creating a new file.
+      if (isPickSave && pickFormatId && pickRowIndices.length > 0) {
+        const existingPick = await CreatedExcelFile.findOne({
+          createdBy: userIdObjPost,
+          labourType: labourType as string,
+          isMerged: { $ne: true },
+          formatId: new mongoose.Types.ObjectId(pickFormatId),
+          pickedTemplateRowIndices: { $exists: true, $ne: [] },
+          dailyWorkDate: { $exists: false },
+          originalFilename: { $not: /_[0-9]{4}-[0-9]{2}-[0-9]{2}\.xlsx$/i },
+        }).sort({ updatedAt: -1 });
+
+        if (existingPick) {
+          existingPick.originalFilename = file.name;
+          existingPick.fileData = buffer;
+          existingPick.rowCount = rowCount;
+          existingPick.pickedTemplateRowIndices = pickRowIndices;
+          existingPick.lastEditedAt = new Date();
+          existingPick.lastEditedBy = userIdObjPost;
+          existingPick.lastEditedByName = userName;
+          await existingPick.save();
+
+          await CreatedExcelFile.deleteMany({
+            createdBy: userIdObjPost,
+            labourType: labourType as string,
+            isMerged: { $ne: true },
+            _id: { $ne: existingPick._id },
+            formatId: new mongoose.Types.ObjectId(pickFormatId),
+            pickedTemplateRowIndices: { $exists: true, $ne: [] },
+            dailyWorkDate: { $exists: false },
+            originalFilename: { $not: /_[0-9]{4}-[0-9]{2}-[0-9]{2}\.xlsx$/i },
+          });
+
+          const updatedMergedFilesPick = await regenerateMergedFilesForSource({
+            sourceFileId: existingPick._id.toString(),
+            sourceOriginalFilename: existingPick.originalFilename,
+            userId: userId as string,
+            userName,
+          });
+
+          const pickFmt = existingPick.formatId?.toString?.();
+          if (pickFmt) emitFormatDailyMergeInvalidate({ formatId: pickFmt });
+
+          return NextResponse.json({
+            success: true,
+            message: 'Excel file updated successfully',
+            data: {
+              id: existingPick._id,
+              filename: existingPick.originalFilename,
+              labourType: existingPick.labourType,
+              rowCount: existingPick.rowCount,
+              createdAt: existingPick.createdAt,
+              updatedAt: existingPick.updatedAt,
+              lastEditedAt: existingPick.lastEditedAt,
+              lastEditedBy: existingPick.lastEditedBy,
+              lastEditedByName: existingPick.lastEditedByName,
+            },
+            updatedMergedFiles:
+              updatedMergedFilesPick.length > 0 ? updatedMergedFilesPick : undefined,
+            mergedFilesUpdated: updatedMergedFilesPick.length,
+          });
+        }
+      }
+
       const createdFile = await CreatedExcelFile.create(createPayload);
       const doc = Array.isArray(createdFile) ? createdFile[0] : createdFile;
 

@@ -1474,6 +1474,25 @@ export default function ExcelCreator({
             role="toolbar"
             aria-label="Row actions"
           >
+            {/** Pick mode (admin source sheet): keep only Save my pick button. */}
+            {!currentEditingFileId && useCustomFormat ? (
+              <>
+                {rows.some((row) => {
+                  const t = getPickTemplateRowIndex(row);
+                  return t !== null && !pickedByOthers[t];
+                }) && (
+                  <button
+                    type="button"
+                    onClick={() => void savePickData()}
+                    disabled={savingPick || !token}
+                    className="px-4 py-2 bg-[#217346] text-white rounded-md hover:bg-[#1a5c38] cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
+                  >
+                    {savingPick ? 'Saving...' : 'Save my pick'}
+                  </button>
+                )}
+              </>
+            ) : (
+              <>
             {useCustomFormat &&
               !currentEditingFileId &&
               rows.some((row) => {
@@ -1572,6 +1591,8 @@ export default function ExcelCreator({
             >
               📄 Create & Download Excel
             </button>
+              </>
+            )}
           </div>
         </>
       )}
