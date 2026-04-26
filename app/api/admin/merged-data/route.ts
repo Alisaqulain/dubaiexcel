@@ -38,6 +38,7 @@ async function handleGet(req: AuthenticatedRequest) {
     const fileId = searchParams.get('fileId');
     const formatIdParam = searchParams.get('formatId');
     let date = searchParams.get('date') || '';
+    const labourTypeQ = searchParams.get('labourType')?.trim() || '';
     const download = searchParams.get('download') === '1' || searchParams.get('download') === 'true';
     const debugMerge =
       searchParams.get('debugMerge') === '1' || searchParams.get('debugMerge') === 'true';
@@ -91,8 +92,13 @@ async function handleGet(req: AuthenticatedRequest) {
       return NextResponse.json({ error: 'Format not found' }, { status: 404 });
     }
 
+    const labourFilter =
+      labourTypeQ && ['OUR_LABOUR', 'SUPPLY_LABOUR', 'SUBCONTRACTOR'].includes(labourTypeQ)
+        ? labourTypeQ
+        : null;
+
     const [docs, templateData, pickDocs] = await Promise.all([
-      loadCreatedFilesForFormatAndDay(formatIdObj, range.start, range.end, date),
+      loadCreatedFilesForFormatAndDay(formatIdObj, range.start, range.end, date, labourFilter),
       FormatTemplateData.findOne({ formatId: formatIdObj }).lean(),
       PickedTemplateRow.find({ formatId: formatIdObj }).select('rowIndex empName empId').lean(),
     ]);

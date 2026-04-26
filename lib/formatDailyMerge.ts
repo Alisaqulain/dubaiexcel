@@ -68,6 +68,29 @@ function resolveParsedValueForTemplateColumn(
 }
 
 /**
+ * One merge baseline row per template line: keys are format column names only, values resolved
+ * from the raw template row (exact key, then fuzzy header match). Without this, admin-uploaded
+ * headers (e.g. "EMPLOYEE NAME") stay on the object while saves use format names ("NAME"), so
+ * overlays update one key and stale template keys still show in the grid.
+ */
+function templateRowToCanonicalBase(
+  tplRow: Record<string, unknown>,
+  namedCols: string[]
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const col of namedCols) {
+    const exact = tplRow[col];
+    if (exact !== undefined && exact !== null && String(exact).trim() !== '') {
+      out[col] = exact;
+      continue;
+    }
+    const resolved = resolveParsedValueForTemplateColumn(tplRow, col);
+    out[col] = resolved !== undefined && resolved !== null ? resolved : '';
+  }
+  return out;
+}
+
+/**
  * Copy cells from a parsed workbook row onto a template merge row using format column names.
  * Fixes exports where headers include column letters ("C EMP ID") so values land in "EMP ID".
  * Second pass: for every cell already on the template row, pull from pr by normalized header so
@@ -357,12 +380,43 @@ export function mergeDailyFileRows(
   return { rows: all, columnOrder };
 }
 
+/**
+ * Keep only documents whose workday matches {@param calendarYmd} (explicit marker or filename suffix),
+ * with the same fallback rules as {@link loadCreatedFilesForFormatAndDay}.
+ */
+export function filterCreatedFilesToCalendarDay(
+  allDocs: Array<Record<string, unknown>>,
+  calendarYmd: string
+): Array<Record<string, unknown>> {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(calendarYmd)) return allDocs;
+  const daySuffixRe = new RegExp(`_${calendarYmd.replace(/-/g, '\\-')}\\.xlsx$`, 'i');
+  const dayTagged = allDocs.filter((d) => {
+    const dailyWorkDate = String(d.dailyWorkDate ?? '').trim();
+    const originalFilename = String(d.originalFilename ?? '').trim();
+    return dailyWorkDate === calendarYmd || daySuffixRe.test(originalFilename);
+  });
+  if (dayTagged.length > 0) {
+    return dayTagged;
+  }
+  return allDocs.filter((d) => {
+    const originalFilename = String(d.originalFilename ?? '').trim();
+    const isPickSnapshot = /^my_pick_/i.test(originalFilename);
+    if (isPickSnapshot) return false;
+    const pickIndices = Array.isArray(d.pickedTemplateRowIndices)
+      ? (d.pickedTemplateRowIndices as unknown[])
+      : [];
+    return pickIndices.length === 0;
+  });
+}
+
 export async function loadCreatedFilesForFormatAndDay(
   formatIdObj: mongoose.Types.ObjectId,
   start: Date,
   end: Date,
   /** YYYY-MM-DD — include “My data” / daily saves whose workday is this date even if lastEditedAt falls outside the range. */
-  calendarYmd?: string | null
+  calendarYmd?: string | null,
+  /** When set, only loads saves for this labour bucket (admin daily group). */
+  labourType?: string | null
 ) {
   const orClause: Record<string, unknown>[] = [
     { lastEditedAt: { $gte: start, $lte: end } },
@@ -376,11 +430,19 @@ export async function loadCreatedFilesForFormatAndDay(
     });
   }
 
-  const docs = await CreatedExcelFile.find({
+  const baseQuery: Record<string, unknown> = {
     formatId: formatIdObj,
     isMerged: { $ne: true },
     $or: orClause,
-  })
+  };
+  if (
+    labourType &&
+    ['OUR_LABOUR', 'SUPPLY_LABOUR', 'SUBCONTRACTOR'].includes(labourType)
+  ) {
+    baseQuery.labourType = labourType;
+  }
+
+  const docs = await CreatedExcelFile.find(baseQuery)
     .select(
       '+fileData createdByName createdByEmail originalFilename lastEditedAt updatedAt createdAt pickedTemplateRowIndices dailyWorkDate'
     )
@@ -390,31 +452,50 @@ export async function loadCreatedFilesForFormatAndDay(
     return docs;
   }
 
-  // Prefer explicit day markers (dailyWorkDate / YYYY-MM-DD filename suffix) for accuracy.
-  // Some legacy saves may miss these markers; in that case, fall back to same-day timestamp docs
-  // while excluding pick snapshots so they do not overwrite daily work saves.
-  const daySuffixRe = new RegExp(`_${calendarYmd.replace(/-/g, '\\-')}\\.xlsx$`, 'i');
-  const allDocs = docs as Array<Record<string, unknown>>;
-  const dayTagged = allDocs.filter((d) => {
-    const dailyWorkDate = String(d.dailyWorkDate ?? '').trim();
-    const originalFilename = String(d.originalFilename ?? '').trim();
-    return dailyWorkDate === calendarYmd || daySuffixRe.test(originalFilename);
-  });
+  return filterCreatedFilesToCalendarDay(docs as Array<Record<string, unknown>>, calendarYmd) as typeof docs;
+}
 
-  if (dayTagged.length > 0) {
-    return dayTagged;
+/** Same day/query as {@link loadCreatedFilesForFormatAndDay} but no `fileData` (for admin lists). */
+export async function listCreatedFilesForFormatAndDayMetadata(
+  formatIdObj: mongoose.Types.ObjectId,
+  start: Date,
+  end: Date,
+  calendarYmd: string | null,
+  labourType?: string | null
+) {
+  const orClause: Record<string, unknown>[] = [
+    { lastEditedAt: { $gte: start, $lte: end } },
+    { updatedAt: { $gte: start, $lte: end } },
+    { createdAt: { $gte: start, $lte: end } },
+  ];
+  if (calendarYmd && /^\d{4}-\d{2}-\d{2}$/.test(calendarYmd)) {
+    orClause.push({ dailyWorkDate: calendarYmd });
+    orClause.push({
+      originalFilename: new RegExp(`_${calendarYmd.replace(/-/g, '\\-')}\\.xlsx$`, 'i'),
+    });
   }
-
-  return allDocs.filter((d) => {
-    const originalFilename = String(d.originalFilename ?? '').trim();
-    const isPickSnapshot = /^my_pick_/i.test(originalFilename);
-    if (isPickSnapshot) return false;
-    const pickIndices = Array.isArray(d.pickedTemplateRowIndices)
-      ? (d.pickedTemplateRowIndices as unknown[])
-      : [];
-    // If no explicit day markers exist, avoid using pick-backed snapshots as day files.
-    return pickIndices.length === 0;
-  });
+  const baseQuery: Record<string, unknown> = {
+    formatId: formatIdObj,
+    isMerged: { $ne: true },
+    $or: orClause,
+  };
+  if (
+    labourType &&
+    ['OUR_LABOUR', 'SUPPLY_LABOUR', 'SUBCONTRACTOR'].includes(labourType)
+  ) {
+    baseQuery.labourType = labourType;
+  }
+  const docs = await CreatedExcelFile.find(baseQuery)
+    .select(
+      'createdByName createdByEmail originalFilename lastEditedAt updatedAt createdAt pickedTemplateRowIndices dailyWorkDate labourType rowCount formatId createdBy'
+    )
+    .populate('createdBy', 'name email')
+    .sort({ updatedAt: -1 })
+    .lean();
+  if (!(calendarYmd && /^\d{4}-\d{2}-\d{2}$/.test(calendarYmd))) {
+    return docs;
+  }
+  return filterCreatedFilesToCalendarDay(docs as Array<Record<string, unknown>>, calendarYmd);
 }
 
 type AdminMergeFile = {
@@ -499,11 +580,17 @@ export function mergeAdminTemplateDailyMerge(
   const storageToMergedIdx = new Map<number, number>();
   const merged: Record<string, unknown>[] = activeStorageIndices.map((storageIndex) => {
     const r = fullRows[storageIndex] as Record<string, unknown>;
-    const clean = { ...r };
-    delete clean.__deleted;
-    delete clean[TEMPLATE_ROW_INDEX];
+    const base =
+      namedCols.length > 0
+        ? templateRowToCanonicalBase(r, namedCols)
+        : (() => {
+            const clean = { ...r };
+            delete clean.__deleted;
+            delete clean[TEMPLATE_ROW_INDEX];
+            return clean as Record<string, unknown>;
+          })();
     return {
-      ...clean,
+      ...base,
       [SUBMITTED_BY_COL]: '',
       [SAVED_AT_COL]: '',
       [LAST_SAVED_COL]: '',

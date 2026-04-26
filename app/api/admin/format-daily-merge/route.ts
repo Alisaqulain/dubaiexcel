@@ -26,6 +26,7 @@ async function handleGet(req: AuthenticatedRequest) {
     const { searchParams } = new URL(req.url || '', 'http://localhost');
     const formatId = searchParams.get('formatId');
     let date = searchParams.get('date') || '';
+    const labourType = searchParams.get('labourType')?.trim() || '';
     const download = searchParams.get('download') === '1' || searchParams.get('download') === 'true';
     const rangeStartQ = searchParams.get('rangeStart');
     const rangeEndQ = searchParams.get('rangeEnd');
@@ -50,8 +51,11 @@ async function handleGet(req: AuthenticatedRequest) {
     }
 
     const formatIdObj = new mongoose.Types.ObjectId(formatId);
+    const labourFilter =
+      labourType && ['OUR_LABOUR', 'SUPPLY_LABOUR', 'SUBCONTRACTOR'].includes(labourType) ? labourType : null;
+
     const [docs, templateData, pickDocs] = await Promise.all([
-      loadCreatedFilesForFormatAndDay(formatIdObj, range.start, range.end, date),
+      loadCreatedFilesForFormatAndDay(formatIdObj, range.start, range.end, date, labourFilter),
       FormatTemplateData.findOne({ formatId: formatIdObj }).lean(),
       PickedTemplateRow.find({ formatId: formatIdObj }).select('rowIndex empName empId').lean(),
     ]);
@@ -77,7 +81,8 @@ async function handleGet(req: AuthenticatedRequest) {
       const safeName = String((fmt as any).name || 'format')
         .replace(/[^a-z0-9]+/gi, '_')
         .slice(0, 80);
-      const filename = `${safeName}_all_merge_${date}.xlsx`;
+      const labPart = labourFilter ? `_${labourFilter}` : '';
+      const filename = `${safeName}_all_merge_${date}${labPart}.xlsx`;
       return new NextResponse(new Uint8Array(buf), {
         headers: {
           'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
@@ -91,6 +96,7 @@ async function handleGet(req: AuthenticatedRequest) {
       data: {
         date,
         formatId,
+        labourType: labourFilter || undefined,
         formatName: (fmt as any).name || '',
         fileCount: docs.length,
         rowCount: rows.length,

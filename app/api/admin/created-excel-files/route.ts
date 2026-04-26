@@ -24,10 +24,16 @@ async function handleGetCreatedExcelFiles(req: AuthenticatedRequest) {
     const qFilename = searchParams.get('q')?.trim();
     const limit = parseInt(searchParams.get('limit') || '1000'); // Increased limit to show more files
     const skip = parseInt(searchParams.get('skip') || '0');
+    const cleanOnly = cleanParam === '1' || cleanParam === 'true';
+    const groupByDay =
+      (searchParams.get('groupByDay') === '1' || searchParams.get('groupByDay') === 'true') &&
+      cleanOnly &&
+      isMergedParam === 'false';
+    const GROUP_SCAN_LIMIT = 8000;
 
     // Build query - include all files (both employee-saved and admin-uploaded)
     const query: any = {};
-    if (qFilename) {
+    if (qFilename && !groupByDay) {
       const esc = qFilename.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       query.originalFilename = new RegExp(esc, 'i');
     }
@@ -39,7 +45,7 @@ async function handleGetCreatedExcelFiles(req: AuthenticatedRequest) {
     }
     if (isMergedParam === 'true') query.isMerged = true;
     if (isMergedParam === 'false') query.isMerged = false;
-    const cleanOnly = cleanParam === '1' || cleanParam === 'true';
+
     if (cleanOnly && isMergedParam === 'false') {
       // Clean list: only day-save files, exclude pick snapshots.
       if (!query.$and) query.$and = [];
@@ -69,12 +75,16 @@ async function handleGetCreatedExcelFiles(req: AuthenticatedRequest) {
       .select('-fileData') // Don't include file data in list (too large)
       .populate('createdBy', 'name email')
       .populate('formatId', 'name')
-      .sort({ 
-        isMerged: 1, // Original files first (false < true)
-        createdAt: -1 // Then by date, newest first
-      })
-      .limit(limit)
-      .skip(skip)
+      .sort(
+        groupByDay
+          ? { updatedAt: -1 }
+          : {
+              isMerged: 1, // Original files first (false < true)
+              createdAt: -1, // Then by date, newest first
+            }
+      )
+      .limit(groupByDay ? GROUP_SCAN_LIMIT : limit)
+      .skip(groupByDay ? 0 : skip)
       .lean();
 
     // Backfill mergeCount for files that don't have it set
@@ -155,8 +165,8 @@ async function handleGetCreatedExcelFiles(req: AuthenticatedRequest) {
     const toTs = (f: any): number =>
       new Date(f.lastEditedAt || f.updatedAt || f.createdAt || 0).getTime();
 
-    // Clean mode: one latest file per owner+format+work-day.
-    const outputFiles = cleanOnly
+    // Clean mode: one latest file per owner+format+work-day (+ labour type when grouping).
+    const dedupedCleanFiles = cleanOnly
       ? (() => {
           const latest = new Map<string, any>();
           for (const f of enhancedFiles as any[]) {
@@ -174,7 +184,8 @@ async function handleGetCreatedExcelFiles(req: AuthenticatedRequest) {
               dayFromFilename(String(f.originalFilename || '')) ||
               '';
             if (!day) continue;
-            const key = `${ownerId}|${fmtId}|${day}`;
+            const lab = String(f.labourType || '').trim() || 'UNKNOWN';
+            const key = groupByDay ? `${ownerId}|${fmtId}|${day}|${lab}` : `${ownerId}|${fmtId}|${day}`;
             const prev = latest.get(key);
             if (!prev || toTs(f) >= toTs(prev)) latest.set(key, f);
           }
@@ -182,15 +193,106 @@ async function handleGetCreatedExcelFiles(req: AuthenticatedRequest) {
         })()
       : enhancedFiles;
 
-    // Get total count
-    const total = await CreatedExcelFile.countDocuments(query);
+    const contributorLabel = (f: any): string => {
+      if (f.createdBy && typeof f.createdBy === 'object') {
+        const n = String(f.createdBy.name || '').trim();
+        const e = String(f.createdBy.email || '').trim();
+        if (n && e) return `${n} (${e})`;
+        return n || e || '';
+      }
+      const n = String(f.createdByName || '').trim();
+      const e = String(f.createdByEmail || '').trim();
+      if (n && e) return `${n} (${e})`;
+      return n || e || '';
+    };
+
+    let outputFiles: any[];
+    let responseTotal = 0;
+
+    if (groupByDay) {
+      const byKey = new Map<
+        string,
+        { formatKey: string; day: string; labour: string; files: any[] }
+      >();
+      for (const f of dedupedCleanFiles as any[]) {
+        const fmtId =
+          (f.formatId && typeof f.formatId === 'object' && String(f.formatId._id || '').trim()) ||
+          String(f.formatId || '').trim() ||
+          '';
+        const day =
+          String(f.dailyWorkDate || '').trim() ||
+          dayFromFilename(String(f.originalFilename || '')) ||
+          '';
+        if (!day || !fmtId || fmtId === 'no-format') continue;
+        const labour = String(f.labourType || '').trim() || 'UNKNOWN';
+        const gk = `${fmtId}|${day}|${labour}`;
+        let g = byKey.get(gk);
+        if (!g) {
+          g = { formatKey: fmtId, day, labour, files: [] };
+          byKey.set(gk, g);
+        }
+        g.files.push(f);
+      }
+      const groups = Array.from(byKey.values()).map((g) => {
+        const labels = g.files.map(contributorLabel).filter(Boolean);
+        const unique = Array.from(new Set(labels));
+        let contributorsSummary = unique.slice(0, 4).join(', ');
+        if (unique.length > 4) contributorsSummary += ` +${unique.length - 4} more`;
+        const fmtName =
+          g.files[0].formatId && typeof g.files[0].formatId === 'object'
+            ? String(g.files[0].formatId.name || '').trim()
+            : '';
+        const titleBase = fmtName || 'Saved workbook';
+        const maxTs = Math.max(...g.files.map((x: any) => toTs(x)));
+        const byRecent = [...g.files].sort((a: any, b: any) => toTs(b) - toTs(a));
+        const sampleFilename =
+          String(byRecent[0]?.originalFilename || '').trim() || `${titleBase.replace(/\s+/g, '_')}_${g.day}.xlsx`;
+        return {
+          isDailyGroup: true as const,
+          _id: `dg:${g.formatKey}:${g.day}:${g.labour}`,
+          formatId: g.files[0].formatId,
+          formatName: titleBase,
+          sampleFilename,
+          dailyWorkDate: g.day,
+          labourType: g.labour,
+          contributorCount: g.files.length,
+          contributorsSummary,
+          sourceFileIds: g.files.map((x: any) => String(x._id)),
+          /** Short name for lists (actual .xlsx); UI shows date & format in other columns. */
+          originalFilename: sampleFilename,
+          rowCount: undefined,
+          lastEditedAt: new Date(maxTs).toISOString(),
+          updatedAt: new Date(maxTs).toISOString(),
+        };
+      });
+      groups.sort((a, b) => toTs(b) - toTs(a));
+      const qLow = (qFilename || '').toLowerCase();
+      const filtered = qLow
+        ? groups.filter(
+            (g) =>
+              String(g.sampleFilename || '').toLowerCase().includes(qLow) ||
+              String(g.formatName || '').toLowerCase().includes(qLow) ||
+              g.contributorsSummary.toLowerCase().includes(qLow) ||
+              g.dailyWorkDate.includes(qLow)
+          )
+        : groups;
+      responseTotal = filtered.length;
+      outputFiles = filtered.slice(skip, skip + limit);
+    } else {
+      outputFiles = dedupedCleanFiles;
+    }
+
+    const dbTotal = await CreatedExcelFile.countDocuments(query);
 
     return NextResponse.json({
       success: true,
       data: outputFiles,
-      total: cleanOnly ? outputFiles.length : total,
+      total: groupByDay ? responseTotal : cleanOnly ? dedupedCleanFiles.length : dbTotal,
       limit,
       skip,
+      ...(groupByDay && files.length >= GROUP_SCAN_LIMIT
+        ? { listNote: 'List is capped from the most recently updated saves; total may be incomplete.' }
+        : {}),
     });
   } catch (error: any) {
     console.error('Get created Excel files error:', error);
