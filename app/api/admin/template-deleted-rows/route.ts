@@ -5,9 +5,11 @@ import ExcelFormat from '@/models/ExcelFormat';
 import FormatTemplateData from '@/models/FormatTemplateData';
 import mongoose from 'mongoose';
 
+import { buildColumnTypesMap } from '@/lib/formatColumnUtils';
+
 /**
  * GET /api/admin/template-deleted-rows?formatId=optional
- * Lists soft-deleted template rows per format (for admin "Deleted data" page).
+ * Lists soft-deleted template rows per format with full row data (all columns).
  */
 async function handleGet(req: AuthenticatedRequest) {
   try {
@@ -24,37 +26,40 @@ async function handleGet(req: AuthenticatedRequest) {
     const out: {
       formatId: string;
       formatName: string;
-      deletedRows: { rowIndex: number; preview: string }[];
+      columns: string[];
+      columnTypes: Record<string, string>;
+      deletedRows: { rowIndex: number; row: Record<string, unknown> }[];
     }[] = [];
 
     for (const f of formats) {
-      const formatId = (f as any)._id;
+      const formatId = (f as { _id: unknown })._id;
       const td = await FormatTemplateData.findOne({ formatId }).lean();
-      if (!td || !Array.isArray((td as any).rows) || (td as any).rows.length === 0) continue;
+      if (!td || !Array.isArray((td as { rows?: unknown[] }).rows) || (td as { rows: unknown[] }).rows.length === 0)
+        continue;
 
-      const cols = ((f as any).columns || [])
+      const formatColumns = ((f as { columns?: { name: string; type?: string; order?: number }[] }).columns || [])
         .slice()
-        .sort((a: { order: number }, b: { order: number }) => a.order - b.order);
-      const deletedRows: { rowIndex: number; preview: string }[] = [];
+        .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+      const columns = formatColumns.map((c) => c.name).filter(Boolean);
+      const columnTypes = buildColumnTypesMap(formatColumns);
+      const deletedRows: { rowIndex: number; row: Record<string, unknown> }[] = [];
 
-      (td as any).rows.forEach((r: Record<string, unknown>, i: number) => {
+      (td as { rows: Record<string, unknown>[] }).rows.forEach((r, i) => {
         if (r && typeof r === 'object' && r.__deleted === true) {
-          const preview = cols
-            .slice(0, 5)
-            .map((c: { name: string }) => String(r[c.name] ?? '').trim())
-            .filter(Boolean)
-            .join(' · ');
-          deletedRows.push({
-            rowIndex: i,
-            preview: preview || `(row ${i + 1}, empty preview)`,
-          });
+          const row: Record<string, unknown> = {};
+          for (const col of columns) {
+            row[col] = r[col] ?? '';
+          }
+          deletedRows.push({ rowIndex: i, row });
         }
       });
 
       if (deletedRows.length > 0) {
         out.push({
           formatId: String(formatId),
-          formatName: String((f as any).name || 'Unnamed format'),
+          formatName: String((f as { name?: string }).name || 'Unnamed format'),
+          columns,
+          columnTypes,
           deletedRows,
         });
       }

@@ -6,6 +6,7 @@ import ExcelFormat from '@/models/ExcelFormat';
 import CreatedExcelFile from '@/models/CreatedExcelFile';
 import PickedTemplateRow from '@/models/PickedTemplateRow';
 import { reconcilePickFileWithTemplate } from '@/lib/reconcilePickFileWithTemplate';
+import { filterIncomingRowsByUniqueColumns } from '@/lib/formatColumnUtils';
 import * as XLSX from 'xlsx';
 import mongoose from 'mongoose';
 
@@ -18,7 +19,14 @@ async function handleSaveTemplateData(req: AuthenticatedRequest) {
     await connectDB();
 
     const body = await req.json();
-    const { formatId, rows } = body;
+    const { formatId, rows: rowsBody, mode, uniqueKeyColumn } = body;
+    const saveMode = mode === 'append' ? 'append' : 'replace';
+    const uniqueKeyColumns =
+      typeof uniqueKeyColumn === 'string' && uniqueKeyColumn.trim()
+        ? [uniqueKeyColumn.trim()]
+        : Array.isArray(body.uniqueKeyColumns)
+          ? body.uniqueKeyColumns.map((x: unknown) => String(x).trim()).filter(Boolean)
+          : [];
 
     if (!formatId) {
       return NextResponse.json(
@@ -27,7 +35,7 @@ async function handleSaveTemplateData(req: AuthenticatedRequest) {
       );
     }
 
-    if (!rows || !Array.isArray(rows)) {
+    if (!rowsBody || !Array.isArray(rowsBody)) {
       return NextResponse.json(
         { error: 'Rows must be an array' },
         { status: 400 }
@@ -41,6 +49,36 @@ async function handleSaveTemplateData(req: AuthenticatedRequest) {
         { error: 'Format not found' },
         { status: 404 }
       );
+    }
+
+    const formatColumns = (format.columns || []) as {
+      name: string;
+      type?: string;
+      unique?: boolean;
+      required?: boolean;
+      order?: number;
+      validation?: { options?: string[] };
+    }[];
+
+    let rows = rowsBody as Record<string, unknown>[];
+    let skippedDuplicates = 0;
+    let skippedSamples: string[] = [];
+
+    if (saveMode === 'append') {
+      if (uniqueKeyColumns.length === 0) {
+        return NextResponse.json(
+          { error: 'Append requires uniqueKeyColumn — choose which column to skip duplicates on (e.g. EMP ID)' },
+          { status: 400 }
+        );
+      }
+      const existingDoc = await FormatTemplateData.findOne({ formatId }).lean();
+      const existingRows = (existingDoc?.rows as Record<string, unknown>[]) || [];
+      const filtered = filterIncomingRowsByUniqueColumns(existingRows, rowsBody, formatColumns, {
+        uniqueColumnNames: uniqueKeyColumns,
+      });
+      rows = [...existingRows, ...filtered.accepted];
+      skippedDuplicates = filtered.skipped;
+      skippedSamples = filtered.skippedSamples;
     }
 
     // Save or update template data
@@ -163,8 +201,15 @@ async function handleSaveTemplateData(req: AuthenticatedRequest) {
       data: {
         formatId: templateData.formatId,
         rowsCount: templateData.rows.length,
+        mode: saveMode,
+        skippedDuplicates,
+        skippedSamples,
+        addedCount: saveMode === 'append' ? rowsBody.length - skippedDuplicates : rows.length,
       },
-      message: `Successfully saved ${rows.length} rows as template data`,
+      message:
+        saveMode === 'append'
+          ? `Appended ${rowsBody.length - skippedDuplicates} row(s)${skippedDuplicates ? `; skipped ${skippedDuplicates} duplicate(s) on unique columns` : ''}. Total ${templateData.rows.length} rows.`
+          : `Successfully saved ${rows.length} rows as template data`,
     });
   } catch (error: any) {
     console.error('Save template data error:', error);

@@ -5,6 +5,7 @@ import CreatedExcelFile from '@/models/CreatedExcelFile';
 import ExcelFormat from '@/models/ExcelFormat';
 import FormatTemplateData from '@/models/FormatTemplateData';
 import { mergeAdminTemplateDailyMerge, rowsFromExcelBuffer } from '@/lib/formatDailyMerge';
+import { buildColumnTypesMap } from '@/lib/formatColumnUtils';
 import * as XLSX from 'xlsx';
 
 function stripInternalRowKeys(rows: Record<string, unknown>[]): Record<string, unknown>[] {
@@ -56,6 +57,7 @@ async function handleViewExcelFile(
 
     let jsonData: Record<string, unknown>[] = [];
     let columnOrder: string[] | undefined;
+    let columnTypes: Record<string, string> | undefined;
     let viewMode: 'fullTemplate' | 'raw' = 'raw';
 
     /** Same template overlay as daily merge: full master rows + this file’s edits (pick indices or EMP/SR match). */
@@ -87,7 +89,19 @@ async function handleViewExcelFile(
         );
         jsonData = stripInternalRowKeys(merged.rows);
         columnOrder = merged.columnOrder.filter((c) => !c.startsWith('_'));
+        columnTypes = buildColumnTypesMap(
+          (formatDoc as { columns?: { name: string; type?: string }[] }).columns
+        );
         viewMode = 'fullTemplate';
+      }
+    }
+
+    if (viewMode === 'raw' && file.formatId) {
+      const formatDoc = await ExcelFormat.findById(file.formatId).select('columns').lean();
+      if (formatDoc) {
+        columnTypes = buildColumnTypesMap(
+          (formatDoc as { columns?: { name: string; type?: string }[] }).columns
+        );
       }
     }
 
@@ -111,6 +125,7 @@ async function handleViewExcelFile(
         expandedRowCount: viewMode === 'fullTemplate' ? jsonData.length : undefined,
         viewMode,
         columnOrder,
+        columnTypes,
         createdAt: file.createdAt,
         updatedAt: file.updatedAt,
         isMerged: file.isMerged,

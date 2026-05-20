@@ -7,6 +7,7 @@ import Navigation from '../../components/Navigation';
 import { useAuth } from '../../context/AuthContext';
 import { highlightAllSearchMatches } from '../../components/HighlightSearch';
 import { useDebounce, SEARCH_DEBOUNCE_MS } from '@/lib/useDebounce';
+import { formatCellValueForDisplay, parseExcelBufferToFormatRows, filterIncomingRowsByUniqueColumns, guessDefaultUniqueColumnName } from '@/lib/formatColumnUtils';
 import Link from 'next/link';
 
 interface Column {
@@ -34,36 +35,6 @@ function getColumnLetter(index: number): string {
     n = Math.floor(n / 26) - 1;
   }
   return s;
-}
-
-function formatCellValueForDisplay(value: unknown, columnType: string): string {
-  if (value === undefined || value === null || value === '') return '';
-  const stringValue = String(value).trim();
-  if (columnType === 'date') {
-    const excelSerial = parseFloat(stringValue);
-    if (!isNaN(excelSerial) && excelSerial > 0 && excelSerial < 1000000) {
-      const excelEpoch = new Date(1899, 11, 30);
-      const date = new Date(excelEpoch.getTime() + excelSerial * 24 * 60 * 60 * 1000);
-      if (!isNaN(date.getTime())) {
-        const day = String(date.getDate()).padStart(2, '0');
-        const month = String(date.getMonth() + 1).padStart(2, '0');
-        const year = date.getFullYear();
-        return `${day}/${month}/${year}`;
-      }
-    }
-    if (/^\d{4}-\d{2}-\d{2}$/.test(stringValue)) {
-      const parts = stringValue.split('-');
-      return `${parts[2]}/${parts[1]}/${parts[0]}`;
-    }
-    const parsedDate = new Date(stringValue);
-    if (!isNaN(parsedDate.getTime()) && parsedDate.getFullYear() > 1900 && parsedDate.getFullYear() < 2100) {
-      const day = String(parsedDate.getDate()).padStart(2, '0');
-      const month = String(parsedDate.getMonth() + 1).padStart(2, '0');
-      const year = parsedDate.getFullYear();
-      return `${day}/${month}/${year}`;
-    }
-  }
-  return stringValue;
 }
 
 export default function FormatViewPage() {
@@ -104,6 +75,12 @@ function FormatViewAndEmpPickContent() {
   const [releasingRow, setReleasingRow] = useState<number | null>(null);
   const [assigningRow, setAssigningRow] = useState<number | null>(null);
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [showBulkPanel, setShowBulkPanel] = useState(false);
+  const [bulkRowCount, setBulkRowCount] = useState(10);
+  const [pendingExcelFile, setPendingExcelFile] = useState<File | null>(null);
+  const [importUniqueColumn, setImportUniqueColumn] = useState('');
+  const [importingExcel, setImportingExcel] = useState(false);
+  const excelAppendInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (formatIdFromUrl) setSelectedFormatId(formatIdFromUrl);
@@ -210,6 +187,18 @@ function FormatViewAndEmpPickContent() {
       cancelled = true;
     };
   }, [selectedFormatId, token]);
+
+  useEffect(() => {
+    const cols = columns.length ? columns : editedColumns;
+    if (cols.length === 0) {
+      setImportUniqueColumn('');
+      return;
+    }
+    setImportUniqueColumn((prev) => {
+      if (prev && cols.some((c) => c.name === prev)) return prev;
+      return guessDefaultUniqueColumnName(cols);
+    });
+  }, [columns, editedColumns]);
 
   const handleRelease = async (rowIndex: number) => {
     if (!token || !selectedFormatId) return;
@@ -375,6 +364,110 @@ function FormatViewAndEmpPickContent() {
     });
     setEditedRows((prev) => [...prev, newRow]);
     setTemplateDirty(true);
+  };
+
+  const addBulkTemplateRows = () => {
+    const count = Math.max(1, Math.min(500, Math.floor(bulkRowCount) || 1));
+    const newRows: Record<string, unknown>[] = [];
+    for (let i = 0; i < count; i++) {
+      const newRow: Record<string, unknown> = {};
+      sortedEditedColumns.forEach((c) => {
+        newRow[c.name] = '';
+      });
+      newRows.push(newRow);
+    }
+    setEditedRows((prev) => [...prev, ...newRows]);
+    setTemplateDirty(true);
+    setShowBulkPanel(false);
+    setMessage({ type: 'success', text: `Added ${count} empty rows. Click Save template when done.` });
+  };
+
+  const loadRowsFromPendingExcel = async () => {
+    const file = pendingExcelFile;
+    if (!file) {
+      setMessage({ type: 'error', text: 'Choose an Excel file first.' });
+      return;
+    }
+    if (!importUniqueColumn) {
+      setMessage({ type: 'error', text: 'Choose a unique column first (e.g. EMP ID) to skip duplicate rows.' });
+      return;
+    }
+
+    const colsForImport = (editMode ? editedColumns : columns).map((c) => ({
+      name: c.name,
+      type: c.type,
+      required: c.required,
+      unique: c.unique,
+      order: c.order,
+      validation: c.validation,
+    }));
+    const baseRows = editMode ? editedRows : rows;
+
+    if (!editMode) {
+      setEditedRows(rows);
+      setEditedColumns(columns);
+      setEditMode(true);
+    }
+
+    setImportingExcel(true);
+    setMessage(null);
+    try {
+      const buffer = await file.arrayBuffer();
+      const { rows: imported, missingColumns } = parseExcelBufferToFormatRows(buffer, colsForImport);
+      if (imported.length === 0) {
+        throw new Error('No data rows found. Check that the first row has column headers matching this format.');
+      }
+
+      const { accepted, skipped, skippedSamples } = filterIncomingRowsByUniqueColumns(
+        baseRows,
+        imported,
+        colsForImport,
+        { uniqueColumnNames: [importUniqueColumn] }
+      );
+      if (accepted.length === 0) {
+        throw new Error(
+          skipped > 0
+            ? `All ${imported.length} row(s) skipped — same ${importUniqueColumn} already exists (e.g. ${skippedSamples.slice(0, 3).join(', ')}).`
+            : 'No rows could be added.'
+        );
+      }
+
+      setEditedRows([...baseRows, ...accepted]);
+      setTemplateDirty(true);
+      setPendingExcelFile(null);
+      if (excelAppendInputRef.current) excelAppendInputRef.current.value = '';
+
+      const dupMsg =
+        skipped > 0
+          ? ` ${skipped} row(s) skipped (duplicate ${importUniqueColumn}: ${skippedSamples.slice(0, 3).join(', ')}${skippedSamples.length > 3 ? '…' : ''}).`
+          : '';
+      const missMsg =
+        missingColumns.length > 0
+          ? ` Note: could not match Excel headers for: ${missingColumns.join(', ')} — other columns were imported.`
+          : '';
+      setMessage({
+        type: 'success',
+        text: `${accepted.length} row(s) loaded from ${file.name}.${dupMsg}${missMsg} Click Save template to store.`,
+      });
+    } catch (err: unknown) {
+      setMessage({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Failed to read Excel file',
+      });
+    } finally {
+      setImportingExcel(false);
+    }
+  };
+
+  const handleAppendExcelRows = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0] ?? null;
+    setPendingExcelFile(file);
+    if (file) {
+      setMessage({
+        type: 'success',
+        text: `Selected ${file.name}. Choose unique column, click "Load rows from file", then Save template.`,
+      });
+    }
   };
 
   const addTemplateColumn = () => {
@@ -609,6 +702,13 @@ function FormatViewAndEmpPickContent() {
                   </button>
                   <button
                     type="button"
+                    onClick={() => setShowBulkPanel((v) => !v)}
+                    className="px-3 py-1.5 text-sm font-medium text-purple-700 bg-purple-50 border border-purple-200 rounded hover:bg-purple-100"
+                  >
+                    Bulk add / import
+                  </button>
+                  <button
+                    type="button"
                     onClick={addTemplateColumn}
                     className="px-3 py-1.5 text-sm font-medium text-blue-700 bg-blue-50 border border-blue-200 rounded hover:bg-blue-100"
                   >
@@ -618,7 +718,8 @@ function FormatViewAndEmpPickContent() {
                     type="button"
                     onClick={saveTemplate}
                     disabled={savingTemplate || !templateDirty}
-                    className="px-3 py-1.5 text-sm font-medium text-white bg-blue-600 border border-blue-700 rounded hover:bg-blue-700 disabled:opacity-50"
+                    className="px-3 py-1.5 text-sm font-medium text-white bg-blue-600 border border-blue-700 rounded hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40"
+                    title={templateDirty ? 'Save changes to the database' : 'Make changes first (add rows or load from Excel)'}
                   >
                     {savingTemplate ? 'Saving…' : 'Save template'}
                   </button>
@@ -632,6 +733,88 @@ function FormatViewAndEmpPickContent() {
               Manage Excel Formats
             </Link>
           </div>
+
+          {editMode && showBulkPanel && (
+            <div className="rounded-lg border border-purple-200 bg-purple-50/60 p-3 text-sm">
+              <p className="text-xs text-purple-900 mb-2">
+                1) Choose <strong>unique column</strong> (skip rows with same value already in sheet) → 2) Choose Excel
+                file → 3) <strong>Load rows from file</strong> → 4) <strong>Save template</strong>.
+              </p>
+              <div className="flex flex-wrap items-end gap-3 mb-3">
+                <label className="flex flex-col gap-1 text-xs">
+                  <span className="font-medium text-gray-700">
+                    Unique column <span className="text-red-600">*</span>
+                  </span>
+                  <select
+                    value={importUniqueColumn}
+                    onChange={(e) => setImportUniqueColumn(e.target.value)}
+                    className="min-w-[200px] rounded border border-gray-300 px-2 py-1.5 text-sm"
+                  >
+                    <option value="">— Select column —</option>
+                    {(editMode ? editedColumns : columns).map((c) => (
+                      <option key={c.name} value={c.name}>
+                        {c.name}
+                        {c.unique ? ' (marked unique in format)' : ''}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="text-[10px] text-gray-500">
+                    e.g. EMP ID — if upload has ID 11 and sheet already has 11, that row is not added.
+                  </span>
+                </label>
+              </div>
+              <div className="flex flex-wrap items-end gap-3">
+                <label className="flex flex-col gap-1 text-xs">
+                  <span className="font-medium text-gray-700">Empty rows to add</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={500}
+                    value={bulkRowCount}
+                    onChange={(e) => setBulkRowCount(Number(e.target.value))}
+                    className="w-24 rounded border border-gray-300 px-2 py-1.5 text-sm"
+                  />
+                </label>
+                <button
+                  type="button"
+                  onClick={addBulkTemplateRows}
+                  className="rounded border border-green-300 bg-green-100 px-3 py-1.5 text-xs font-medium text-green-900 hover:bg-green-200"
+                >
+                  Add {Math.max(1, Math.min(500, Math.floor(bulkRowCount) || 1))} rows
+                </button>
+                <div className="flex flex-col gap-1 text-xs">
+                  <span className="font-medium text-gray-700">Import from Excel</span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <input
+                      ref={excelAppendInputRef}
+                      type="file"
+                      accept=".xlsx,.xls"
+                      onChange={handleAppendExcelRows}
+                      className="text-xs file:mr-2 file:rounded file:border-0 file:bg-white file:px-2 file:py-1 file:text-xs file:font-medium"
+                    />
+                    <button
+                      type="button"
+                      disabled={!pendingExcelFile || !importUniqueColumn || importingExcel}
+                      onClick={() => void loadRowsFromPendingExcel()}
+                      className="rounded border border-purple-400 bg-purple-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-purple-700 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {importingExcel ? 'Loading…' : 'Load rows from file'}
+                    </button>
+                  </div>
+                  {pendingExcelFile && (
+                    <span className="text-[11px] text-purple-800">Selected: {pendingExcelFile.name}</span>
+                  )}
+                </div>
+                <Link
+                  href={`/admin/excel-formats`}
+                  className="text-xs text-blue-700 underline hover:text-blue-900"
+                  title="Replace entire master sheet from Excel Formats page"
+                >
+                  Replace full sheet via Excel Formats →
+                </Link>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="flex-1 overflow-auto p-2 bg-[#e2e8f0] min-h-0">
@@ -640,7 +823,17 @@ function FormatViewAndEmpPickContent() {
           ) : loadingView ? (
             <div className="flex items-center justify-center h-full text-gray-500">Loading…</div>
           ) : rows.length === 0 ? (
-            <div className="flex items-center justify-center h-full text-gray-500">No template data for this format.</div>
+            <div className="flex flex-col items-center justify-center h-full gap-2 text-gray-600 px-4 text-center">
+              <p>No template rows yet for this format.</p>
+              <p className="text-sm text-gray-500">
+                Click <strong>Edit template</strong>, then <strong>Bulk add / import</strong> to add empty rows
+                (e.g. 45) or upload an Excel file. Or use{' '}
+                <Link href="/admin/excel-formats" className="text-blue-700 underline">
+                  Excel Formats → Upload master sheet
+                </Link>{' '}
+                to replace the full sheet.
+              </p>
+            </div>
           ) : (
             <div
               className="inline-block min-w-full border border-gray-300 bg-white shadow-sm"

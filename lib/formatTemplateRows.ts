@@ -1,6 +1,9 @@
 /** Original index in FormatTemplateData.rows (stable when rows are soft-deleted). */
 export const TEMPLATE_ROW_INDEX = '__templateRowIndex' as const;
 
+/** Max template rows sent to employee UI in one load (full sheet can be larger in DB). */
+export const EMPLOYEE_TEMPLATE_ROW_LIMIT = 10000;
+
 export function isTemplateRowDeleted(row: unknown): boolean {
   return !!(row && typeof row === 'object' && (row as Record<string, unknown>).__deleted === true);
 }

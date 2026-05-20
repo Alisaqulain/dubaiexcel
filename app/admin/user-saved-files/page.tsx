@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ProtectedRoute } from '../../components/ProtectedRoute';
 import Navigation from '../../components/Navigation';
 import { useAuth } from '../../context/AuthContext';
+import { formatCellValueForDisplay } from '@/lib/formatColumnUtils';
 
 type FormatOption = { _id: string; name: string };
 
@@ -48,7 +49,6 @@ type ColumnAnalysis = {
   absent: number;
   presentPct: number;
   absentPct: number;
-  valueCounts: { value: string; count: number }[];
 };
 
 function cellHasValue(val: unknown): boolean {
@@ -56,35 +56,26 @@ function cellHasValue(val: unknown): boolean {
   return String(val).trim() !== '';
 }
 
-function analyzeColumn(rows: Record<string, unknown>[], column: string): ColumnAnalysis {
+function analyzeColumn(
+  rows: Record<string, unknown>[],
+  column: string,
+  _columnTypes?: Record<string, string>
+): ColumnAnalysis {
   let present = 0;
   let absent = 0;
-  const counts = new Map<string, number>();
 
   for (const row of rows) {
-    const val = row[column];
-    if (cellHasValue(val)) {
-      present++;
-      const key = String(val).trim();
-      counts.set(key, (counts.get(key) || 0) + 1);
-    } else {
-      absent++;
-      counts.set('(empty)', (counts.get('(empty)') || 0) + 1);
-    }
+    if (cellHasValue(row[column])) present++;
+    else absent++;
   }
 
   const total = rows.length;
-  const valueCounts = Array.from(counts.entries())
-    .map(([value, count]) => ({ value, count }))
-    .sort((a, b) => b.count - a.count);
-
   return {
     total,
     present,
     absent,
     presentPct: total ? Math.round((present / total) * 1000) / 10 : 0,
     absentPct: total ? Math.round((absent / total) * 1000) / 10 : 0,
-    valueCounts,
   };
 }
 
@@ -151,11 +142,13 @@ function UserSavedFilesWizard() {
     subtitle?: string;
     columns: string[];
     rows: Record<string, unknown>[];
+    columnTypes: Record<string, string>;
   } | null>(null);
 
   const [analysisLoading, setAnalysisLoading] = useState(false);
   const [analysisRows, setAnalysisRows] = useState<Record<string, unknown>[]>([]);
   const [analysisColumns, setAnalysisColumns] = useState<string[]>([]);
+  const [analysisColumnTypes, setAnalysisColumnTypes] = useState<Record<string, string>>({});
   const [analysisColumn, setAnalysisColumn] = useState('');
   const [fullViewAnalysisColumn, setFullViewAnalysisColumn] = useState('');
 
@@ -246,12 +239,14 @@ function UserSavedFilesWizard() {
       if (!res.ok || !json.success) throw new Error(json.error || 'Failed to open');
       const rawRows = (json.data?.data || []) as Record<string, unknown>[];
       const preferredOrder = (json.data?.columnOrder as string[] | undefined) || [];
+      const columnTypes = (json.data?.columnTypes as Record<string, string> | undefined) || {};
       const { rows, columns } = stripInternalColumns(rawRows, preferredOrder);
       setFullView({
         title: filename,
         subtitle: 'Single employee save (expanded to full sheet when applicable)',
         columns,
         rows,
+        columnTypes,
       });
       setFullViewAnalysisColumn(columns[0] || '');
     } catch (e: unknown) {
@@ -329,6 +324,7 @@ function UserSavedFilesWizard() {
       if (!res.ok || !json.success) throw new Error(json.error || 'Merge failed');
       const rawRows = (json.data?.rows || []) as Record<string, unknown>[];
       const cols = (json.data?.columns as string[]) || [];
+      const columnTypes = (json.data?.columnTypes as Record<string, string> | undefined) || {};
       const { rows, columns } = stripInternalColumns(rawRows, cols);
       const fmtName = formats.find((f) => f._id === formatId)?.name || 'Format';
       setFullView({
@@ -342,6 +338,7 @@ function UserSavedFilesWizard() {
             : `Only data rows from selected files (stacked). ${rows.length} rows.`,
         columns,
         rows,
+        columnTypes,
       });
       setFullViewAnalysisColumn(columns[0] || '');
     } catch (e: unknown) {
@@ -376,14 +373,17 @@ function UserSavedFilesWizard() {
       if (!res.ok || !json.success) throw new Error(json.error || 'Failed to load data for analysis');
       const rawRows = (json.data?.rows || []) as Record<string, unknown>[];
       const cols = (json.data?.columns as string[]) || [];
+      const columnTypes = (json.data?.columnTypes as Record<string, string> | undefined) || {};
       const { rows, columns } = stripInternalColumns(rawRows, cols);
       setAnalysisRows(rows);
       setAnalysisColumns(columns);
+      setAnalysisColumnTypes(columnTypes);
       setAnalysisColumn(columns[0] || '');
     } catch (e: unknown) {
       alert(e instanceof Error ? e.message : 'Analysis failed');
       setAnalysisRows([]);
       setAnalysisColumns([]);
+      setAnalysisColumnTypes({});
       setAnalysisColumn('');
     } finally {
       setAnalysisLoading(false);
@@ -391,14 +391,17 @@ function UserSavedFilesWizard() {
   };
 
   const step3Analysis = useMemo(
-    () => (analysisColumn && analysisRows.length ? analyzeColumn(analysisRows, analysisColumn) : null),
-    [analysisColumn, analysisRows]
+    () =>
+      analysisColumn && analysisRows.length
+        ? analyzeColumn(analysisRows, analysisColumn, analysisColumnTypes)
+        : null,
+    [analysisColumn, analysisRows, analysisColumnTypes]
   );
 
   const fullViewAnalysis = useMemo(
     () =>
       fullView && fullViewAnalysisColumn && fullView.rows.length
-        ? analyzeColumn(fullView.rows, fullViewAnalysisColumn)
+        ? analyzeColumn(fullView.rows, fullViewAnalysisColumn, fullView.columnTypes)
         : null,
     [fullView, fullViewAnalysisColumn]
   );
@@ -410,6 +413,7 @@ function UserSavedFilesWizard() {
         subtitle={fullView.subtitle}
         columns={fullView.columns}
         rows={fullView.rows}
+        columnTypes={fullView.columnTypes}
         analysisColumn={fullViewAnalysisColumn}
         onAnalysisColumnChange={setFullViewAnalysisColumn}
         analysis={fullViewAnalysis}
@@ -599,7 +603,7 @@ function UserSavedFilesWizard() {
               <h3 className="text-sm font-semibold text-gray-900">Column analysis (selected files)</h3>
               <p className="mt-1 text-xs text-gray-600">
                 Combines rows from {selectedIds.length} selected file{selectedIds.length !== 1 ? 's' : ''}. Pick a
-                column to see how many cells are filled vs empty, and a breakdown of values.
+              column to see how many cells are filled vs empty.
               </p>
               <div className="mt-3 flex flex-wrap items-end gap-3">
                 <button
@@ -628,7 +632,7 @@ function UserSavedFilesWizard() {
                 )}
               </div>
               {step3Analysis && (
-                <AnalysisSummary analysis={step3Analysis} columnName={analysisColumn} />
+                <AnalysisSummary analysis={step3Analysis} />
               )}
             </div>
           )}
@@ -713,10 +717,10 @@ function UserSavedFilesWizard() {
   );
 }
 
-function AnalysisSummary({ analysis, columnName }: { analysis: ColumnAnalysis; columnName: string }) {
+function AnalysisSummary({ analysis }: { analysis: ColumnAnalysis }) {
   return (
-    <div className="mt-4 space-y-3">
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+    <div className="mt-4">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
         <div className="rounded-md border border-gray-200 bg-slate-50 px-3 py-2">
           <div className="text-[10px] uppercase tracking-wide text-gray-500">Total rows</div>
           <div className="text-lg font-semibold text-gray-900">{analysis.total}</div>
@@ -735,52 +739,7 @@ function AnalysisSummary({ analysis, columnName }: { analysis: ColumnAnalysis; c
             <span className="text-sm font-normal text-amber-700">({analysis.absentPct}%)</span>
           </div>
         </div>
-        <div className="rounded-md border border-indigo-200 bg-indigo-50 px-3 py-2">
-          <div className="text-[10px] uppercase tracking-wide text-indigo-700">Unique values</div>
-          <div className="text-lg font-semibold text-indigo-900">{analysis.valueCounts.length}</div>
-        </div>
       </div>
-      {analysis.valueCounts.length > 0 && (
-        <div>
-          <h4 className="mb-2 text-xs font-semibold text-gray-800">
-            Value breakdown — <span className="font-normal text-gray-600">{columnName}</span>
-          </h4>
-          <div className="max-h-48 overflow-auto rounded-md border border-gray-200">
-            <table className="min-w-full border-collapse text-xs">
-              <thead className="sticky top-0 bg-gray-100">
-                <tr>
-                  <th className="border-b border-gray-200 px-3 py-1.5 text-left font-semibold text-gray-700">
-                    Value
-                  </th>
-                  <th className="border-b border-gray-200 px-3 py-1.5 text-right font-semibold text-gray-700">
-                    Count
-                  </th>
-                  <th className="border-b border-gray-200 px-3 py-1.5 text-right font-semibold text-gray-700">
-                    %
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {analysis.valueCounts.map(({ value, count }) => (
-                  <tr key={value} className="border-b border-gray-100 hover:bg-slate-50">
-                    <td className="max-w-[320px] break-words px-3 py-1.5 text-gray-900">
-                      {value === '(empty)' ? (
-                        <span className="italic text-amber-700">(empty)</span>
-                      ) : (
-                        value
-                      )}
-                    </td>
-                    <td className="px-3 py-1.5 text-right text-gray-800">{count}</td>
-                    <td className="px-3 py-1.5 text-right text-gray-600">
-                      {analysis.total ? Math.round((count / analysis.total) * 1000) / 10 : 0}%
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
@@ -788,9 +747,11 @@ function AnalysisSummary({ analysis, columnName }: { analysis: ColumnAnalysis; c
 function DataSpreadsheet({
   columns,
   rows,
+  columnTypes = {},
 }: {
   columns: string[];
   rows: Record<string, unknown>[];
+  columnTypes?: Record<string, string>;
 }) {
   return (
     <table className="min-w-max w-full border-collapse text-xs">
@@ -800,6 +761,9 @@ function DataSpreadsheet({
           {columns.map((c) => (
             <th key={c} className="border border-slate-800 px-2 py-1.5 text-left font-semibold whitespace-nowrap">
               {c}
+              {columnTypes[c] === 'date' && (
+                <span className="ml-1 text-[10px] font-normal text-slate-300">(date)</span>
+              )}
             </th>
           ))}
         </tr>
@@ -808,11 +772,18 @@ function DataSpreadsheet({
         {rows.map((r, i) => (
           <tr key={i} className={i % 2 === 0 ? 'bg-white' : 'bg-slate-50'}>
             <td className="border border-gray-200 px-2 py-1 text-gray-500">{i + 1}</td>
-            {columns.map((c) => (
-              <td key={c} className="max-w-[280px] break-words border border-gray-200 px-2 py-1 align-top">
-                {r[c] === null || r[c] === undefined ? '' : String(r[c])}
-              </td>
-            ))}
+            {columns.map((c) => {
+              const colType = columnTypes[c] || 'text';
+              const display =
+                r[c] === null || r[c] === undefined
+                  ? ''
+                  : formatCellValueForDisplay(r[c], colType);
+              return (
+                <td key={c} className="max-w-[280px] break-words border border-gray-200 px-2 py-1 align-top">
+                  {display}
+                </td>
+              );
+            })}
           </tr>
         ))}
       </tbody>
@@ -825,6 +796,7 @@ function FullPageDataView({
   subtitle,
   columns,
   rows,
+  columnTypes,
   analysisColumn,
   onAnalysisColumnChange,
   analysis,
@@ -834,6 +806,7 @@ function FullPageDataView({
   subtitle?: string;
   columns: string[];
   rows: Record<string, unknown>[];
+  columnTypes: Record<string, string>;
   analysisColumn: string;
   onAnalysisColumnChange: (col: string) => void;
   analysis: ColumnAnalysis | null;
@@ -876,12 +849,12 @@ function FullPageDataView({
         </div>
         {analysis && analysisColumn && (
           <div className="mt-3 rounded-lg border border-indigo-100 bg-indigo-50/50 p-3">
-            <AnalysisSummary analysis={analysis} columnName={analysisColumn} />
+            <AnalysisSummary analysis={analysis} />
           </div>
         )}
       </div>
       <div className="min-h-0 flex-1 overflow-auto p-2">
-        <DataSpreadsheet columns={columns} rows={rows} />
+        <DataSpreadsheet columns={columns} rows={rows} columnTypes={columnTypes} />
       </div>
     </div>
   );

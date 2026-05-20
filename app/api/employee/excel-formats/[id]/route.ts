@@ -6,6 +6,7 @@ import FormatTemplateData from '@/models/FormatTemplateData';
 import {
   buildEmployeeTemplatePayload,
   getTemplateRowsByOriginalIndices,
+  EMPLOYEE_TEMPLATE_ROW_LIMIT,
 } from '@/lib/formatTemplateRows';
 import mongoose from 'mongoose';
 
@@ -69,8 +70,7 @@ async function handleGetFormat(
       );
     }
 
-    // Get template data if exists (limit rows to avoid lag - max 250 for initial load)
-    const templateLimit = 250;
+    const templateLimit = EMPLOYEE_TEMPLATE_ROW_LIMIT;
     const templateData = await FormatTemplateData.findOne({ formatId: format._id })
       .select('rows')
       .lean();

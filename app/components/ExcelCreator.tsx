@@ -1,10 +1,14 @@
 'use client';
 
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback, memo, useTransition } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useDebounce, SEARCH_DEBOUNCE_MS } from '@/lib/useDebounce';
 import * as XLSX from 'xlsx';
-import { TEMPLATE_ROW_INDEX, mergeSavedRowsWithTemplateByLocks } from '@/lib/formatTemplateRows';
+import { TEMPLATE_ROW_INDEX, mergeSavedRowsWithTemplateByLocks, EMPLOYEE_TEMPLATE_ROW_LIMIT } from '@/lib/formatTemplateRows';
+import { formatCellValueForDisplay } from '@/lib/formatColumnUtils';
+
+/** Rows rendered per page — keeps DOM small for large admin templates (4000+ rows). */
+const TABLE_ROWS_PER_PAGE = 50;
 
 function getColumnLetter(index: number): string {
   let s = '';
@@ -81,6 +85,45 @@ function getPickTemplateRowIndex(row: ExcelRow | Record<string, unknown>): numbe
   return null;
 }
 
+const PickCheckboxCell = memo(function PickCheckboxCell({
+  pickT,
+  checked,
+  lockedBy,
+  onToggle,
+}: {
+  pickT: number;
+  checked: boolean;
+  lockedBy: { empId: string; empName: string } | null;
+  onToggle: () => void;
+}) {
+  if (lockedBy) {
+    return (
+      <span
+        className="inline-flex items-center gap-1 text-gray-500 text-xs"
+        title={`Picked by: ${lockedBy.empName} (${lockedBy.empId})`}
+      >
+        <svg className="w-4 h-4 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20" aria-hidden="true">
+          <path
+            fillRule="evenodd"
+            d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z"
+            clipRule="evenodd"
+          />
+        </svg>
+        <span className="hidden sm:inline">Locked</span>
+      </span>
+    );
+  }
+  return (
+    <input
+      type="checkbox"
+      checked={checked}
+      onChange={onToggle}
+      title="Pick this row"
+      className="h-4 w-4 cursor-pointer"
+    />
+  );
+});
+
 interface Column {
   name: string;
   type: 'text' | 'number' | 'date' | 'email' | 'dropdown';
@@ -125,6 +168,8 @@ interface ExcelCreatorProps {
   onMyDataDailyFileSaved?: (fileId: string, filename: string) => void;
   /** Parent already merged template + all day saves (pick-workspace-data); do not re-merge in format fetch */
   workspaceDataPremerged?: boolean;
+  /** Fill parent — full-page workspace layout (toolbar + scrollable grid + footer) */
+  fullPage?: boolean;
 }
 
 export default function ExcelCreator({
@@ -141,6 +186,7 @@ export default function ExcelCreator({
   myDataDailySave,
   onMyDataDailyFileSaved,
   workspaceDataPremerged = false,
+  fullPage = false,
 }: ExcelCreatorProps) {
   const { token } = useAuth();
   const initialDataRef = useRef(initialData);
@@ -158,7 +204,7 @@ export default function ExcelCreator({
   const [pasteData, setPasteData] = useState('');
   const [customFormat, setCustomFormat] = useState<ExcelFormat | null>(null);
   const [templateRows, setTemplateRows] = useState<Record<string, any>[]>([]); // Store template rows for read-only column validation
-  const [loadingFormat, setLoadingFormat] = useState(false);
+  const [loadingFormat, setLoadingFormat] = useState(useCustomFormat);
   const [saving, setSaving] = useState(false);
   const [tablePage, setTablePage] = useState(1);
   const [rowSearch, setRowSearch] = useState('');
@@ -175,6 +221,7 @@ export default function ExcelCreator({
   const [addFromFileSearch, setAddFromFileSearch] = useState('');
   const addFromFileSearchDebounced = useDebounce(addFromFileSearch, 200);
   const saveExcelInFlightRef = useRef(false);
+  const [, startPickTransition] = useTransition();
 
   // Update currentEditingFileId when editingFileId prop changes
   useEffect(() => {
@@ -287,7 +334,7 @@ export default function ExcelCreator({
           if (result.success && result.data) {
             setCustomFormat(result.data);
 
-            // Store template rows (API sends max 250 to avoid lag); use for read-only validation
+            // Store template rows (API may cap very large sheets); use for read-only validation
             const loadedRows = result.data.templateRows || [];
             const totalCount = result.data.templateRowCount ?? loadedRows.length;
             setTemplateRows(loadedRows);
@@ -327,10 +374,10 @@ export default function ExcelCreator({
               }
             }
 
-            if (totalCount > 250) {
+            if (totalCount > EMPLOYEE_TEMPLATE_ROW_LIMIT) {
               setMessage({
                 type: 'success',
-                text: `Template has ${totalCount} rows. Loaded first 250 for quick editing. Use "Download Template" to get the full file, or add more rows as needed.`,
+                text: `Template has ${totalCount} rows. Loaded first ${EMPLOYEE_TEMPLATE_ROW_LIMIT} for editing. Use search in the pick column or Download Template for the full file.`,
               });
             } else {
               setMessage(null);
@@ -443,6 +490,48 @@ export default function ExcelCreator({
 
   const columns = getColumns();
   const columnNames = columns.map(col => col.name);
+  const isPickWorkspace = useCustomFormat && !currentEditingFileId;
+  const showPickColumn = isPickWorkspace;
+
+  const filteredRowEntries = useMemo(() => {
+    const searchTrim = debouncedRowSearch.trim().toLowerCase();
+    return rows
+      .map((row, i) => ({ row, templateIndex: i }))
+      .filter(({ row }) => {
+        if (!searchTrim) return true;
+        return columns.some((col) =>
+          String(row[col.name] ?? '')
+            .toLowerCase()
+            .includes(searchTrim)
+        );
+      });
+  }, [rows, debouncedRowSearch, columns]);
+
+  const pickWorkspaceStats = useMemo(() => {
+    if (!showPickColumn) return null;
+    let pickableCount = 0;
+    let lockedCount = 0;
+    for (const row of rows) {
+      const t = getPickTemplateRowIndex(row);
+      if (t === null) continue;
+      if (pickedByOthers[t]) lockedCount++;
+      else pickableCount++;
+    }
+    return { pickableCount, lockedCount };
+  }, [rows, pickedByOthers, showPickColumn]);
+
+  const totalTablePages = Math.max(1, Math.ceil(filteredRowEntries.length / TABLE_ROWS_PER_PAGE));
+
+  const paginatedRowEntries = useMemo(() => {
+    const page = Math.min(Math.max(1, tablePage), totalTablePages);
+    const start = (page - 1) * TABLE_ROWS_PER_PAGE;
+    return filteredRowEntries.slice(start, start + TABLE_ROWS_PER_PAGE);
+  }, [filteredRowEntries, tablePage, totalTablePages]);
+
+  useEffect(() => {
+    if (tablePage > totalTablePages) setTablePage(totalTablePages);
+    else if (tablePage < 1) setTablePage(1);
+  }, [totalTablePages, tablePage]);
 
   const addRow = () => {
     const newRow: ExcelRow = {};
@@ -779,24 +868,29 @@ export default function ExcelCreator({
     }
   };
 
-  const togglePick = (uiRowIndex: number) => {
-    const t = getPickTemplateRowIndex(rows[uiRowIndex] || {});
-    if (t === null || pickedByOthers[t]) return;
-    const wasChecked = pickedRowIndices.has(t);
-    setPickedRowIndices((prev) => {
-      const next = new Set(prev);
-      if (next.has(t)) next.delete(t);
-      else next.add(t);
-      return next;
-    });
-    if (wasChecked && useCustomFormat && formatId && token) {
-      fetch('/api/employee/picked-rows', {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ formatId, rowIndex: t }),
-      }).catch(() => {});
-    }
-  };
+  const togglePick = useCallback(
+    (uiRowIndex: number) => {
+      const t = getPickTemplateRowIndex(rows[uiRowIndex] || {});
+      if (t === null || pickedByOthers[t]) return;
+      const wasChecked = pickedRowIndices.has(t);
+      startPickTransition(() => {
+        setPickedRowIndices((prev) => {
+          const next = new Set(prev);
+          if (next.has(t)) next.delete(t);
+          else next.add(t);
+          return next;
+        });
+      });
+      if (wasChecked && useCustomFormat && formatId && token) {
+        fetch('/api/employee/picked-rows', {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ formatId, rowIndex: t }),
+        }).catch(() => {});
+      }
+    },
+    [rows, pickedByOthers, pickedRowIndices, useCustomFormat, formatId, token]
+  );
   const selectAllPick = () =>
     setPickedRowIndices(
       new Set(
@@ -1133,9 +1227,16 @@ export default function ExcelCreator({
   };
 
   return (
-    <div className="bg-white rounded-lg shadow p-6">
-      <div className="flex justify-between items-center mb-4">
-        <div>
+    <div
+      className={
+        fullPage
+          ? 'flex h-full min-h-0 flex-col overflow-hidden bg-white'
+          : 'bg-white rounded-lg shadow p-6'
+      }
+    >
+      <div className={`shrink-0 ${fullPage ? 'px-3 pt-3' : ''}`}>
+      <div className="flex flex-wrap justify-between items-start gap-3 mb-3">
+        <div className="min-w-0">
           <h3 className="text-lg font-semibold">Create Excel File Online</h3>
           {currentEditingFileId && editingFileName && (
             <p className="text-sm font-medium text-blue-700 mt-1 flex items-center gap-2">
@@ -1253,27 +1354,47 @@ export default function ExcelCreator({
       )}
 
       {message && (
-        <div className={`mb-4 p-3 rounded ${
+        <div className={`mb-3 p-3 rounded ${
           message.type === 'success' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
         }`}>
           {message.text}
         </div>
       )}
+      </div>
 
-      {rows.length === 0 ? (
-        <div className="text-center py-8 text-gray-500">
-          <p className="mb-4">No data added yet. Click &quot;Add Row&quot; to start creating your Excel file.</p>
-          <button
-            type="button"
-            onClick={addRow}
-            className="px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
-          >
-            Add First Row
-          </button>
+      {loadingFormat ? (
+        <div className={`flex flex-1 items-center justify-center text-gray-600 ${fullPage ? 'px-3 pb-3' : ''}`}>
+          <div className="text-center py-12">
+            <div
+              className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-4 border-gray-200 border-t-[#217346]"
+              aria-hidden="true"
+            />
+            <p className="text-base font-medium text-gray-800">Loading admin data…</p>
+            <p className="mt-2 text-sm text-gray-500">Large sheets may take a few seconds.</p>
+          </div>
+        </div>
+      ) : rows.length === 0 ? (
+        <div className={`flex flex-1 items-center justify-center text-gray-500 ${fullPage ? 'px-3 pb-3' : ''}`}>
+          <div className="text-center py-8">
+          <p className="mb-4">
+            {isPickWorkspace
+              ? 'No template rows loaded. Contact your administrator or try again.'
+              : 'No data added yet. Click "Add Row" to start creating your Excel file.'}
+          </p>
+          {!isPickWorkspace && (
+            <button
+              type="button"
+              onClick={addRow}
+              className="px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
+            >
+              Add First Row
+            </button>
+          )}
+          </div>
         </div>
       ) : (
-        <>
-          <div className="mb-3 p-3 bg-white border border-gray-200 rounded-lg shadow-sm">
+        <div className={fullPage ? 'flex min-h-0 flex-1 flex-col overflow-hidden px-3 pb-3' : undefined}>
+          <div className="mb-3 shrink-0 p-3 bg-white border border-gray-200 rounded-lg shadow-sm">
             <label className="block text-sm font-semibold text-gray-700 mb-2">Search rows</label>
             <div className="flex flex-wrap items-center gap-2">
               <input
@@ -1292,36 +1413,30 @@ export default function ExcelCreator({
               </button>
               <span className="text-sm text-gray-600">
                 {(() => {
-                  const showPickColumn = useCustomFormat && !currentEditingFileId;
-                  let pickableCount = rows.length;
-                  let lockedCount = 0;
-                  if (showPickColumn) {
-                    pickableCount = 0;
-                    lockedCount = 0;
-                    rows.forEach((row) => {
-                      const t = getPickTemplateRowIndex(row);
-                      if (t === null) return;
-                      if (pickedByOthers[t]) lockedCount++;
-                      else pickableCount++;
-                    });
-                  }
                   const searchTrim = debouncedRowSearch.trim();
                   const total = rows.length;
-                  const matched = searchTrim
-                    ? rows.filter((r) =>
-                        columns.some((col) =>
-                          String(r[col.name] ?? '').toLowerCase().includes(searchTrim.toLowerCase())
-                        )
-                      ).length
-                    : total;
+                  const matched = filteredRowEntries.length;
+                  const lockedSuffix =
+                    pickWorkspaceStats && pickWorkspaceStats.lockedCount > 0
+                      ? ` (${pickWorkspaceStats.pickableCount} you can pick, ${pickWorkspaceStats.lockedCount} locked — hover to see who)`
+                      : '';
+                  const pageSuffix =
+                    filteredRowEntries.length > TABLE_ROWS_PER_PAGE
+                      ? ` · page ${Math.min(tablePage, totalTablePages)} of ${totalTablePages} (${TABLE_ROWS_PER_PAGE} per page)`
+                      : '';
                   return searchTrim
-                    ? `Showing ${matched} of ${total} rows${lockedCount ? ` (${pickableCount} you can pick, ${lockedCount} locked — hover to see who)` : ''}`
-                    : `${total} row(s)${lockedCount ? ` — ${pickableCount} you can pick, ${lockedCount} locked (hover to see who)` : ''}`;
+                    ? `Showing ${matched} of ${total} rows${lockedSuffix}${pageSuffix}`
+                    : `${total} row(s)${lockedSuffix}${pageSuffix}`;
                 })()}
               </span>
             </div>
           </div>
-          <div className="overflow-auto mb-4 border border-gray-300 bg-white max-h-[70vh] shadow-sm" style={{ fontFamily: 'Calibri, Arial, sans-serif' }}>
+          <div
+            className={`overflow-auto border border-gray-300 bg-white shadow-sm ${
+              fullPage ? 'min-h-0 flex-1' : 'mb-4 max-h-[70vh]'
+            }`}
+            style={{ fontFamily: 'Calibri, Arial, sans-serif' }}
+          >
             <table className="min-w-full border-collapse" style={{ tableLayout: 'auto' }}>
               <thead className="sticky top-0 z-20 bg-[#217346]">
                 <tr>
@@ -1353,123 +1468,159 @@ export default function ExcelCreator({
               </thead>
               <tbody className="bg-white">
                 {(() => {
-                  const showPickColumn = useCustomFormat && !currentEditingFileId;
                   const colSpanTotal = columns.length + (showPickColumn ? 2 : 1);
-                  const searchTrim = debouncedRowSearch.trim();
-                  const visibleEntries = rows.map((row, i) => ({ row, templateIndex: i }));
-                  const filteredEntries = searchTrim
-                    ? visibleEntries.filter(({ row }) =>
-                        columns.some((col) =>
-                          String(row[col.name] ?? '').toLowerCase().includes(searchTrim.toLowerCase())
-                        )
-                      )
-                    : visibleEntries;
-                  return filteredEntries.length === 0 ? (
-                    <tr>
-                      <td colSpan={colSpanTotal} className="px-4 py-6 text-center text-gray-500 border border-gray-300">
-                        No rows match the search.
-                      </td>
-                    </tr>
-                  ) : (
-                    filteredEntries.map(({ row, templateIndex: rowIndex }) => {
-                      const pickT = getPickTemplateRowIndex(row);
-                      const lockedBy = showPickColumn && pickT !== null ? pickedByOthers[pickT] : null;
-                      return (
-                        <tr
-                          key={`r-${rowIndex}-${pickT ?? 'm'}`}
-                          className={lockedBy ? 'bg-gray-100 hover:bg-gray-200' : 'hover:bg-[#e8f4ea]'}
-                        >
-                          <td className="px-2 py-1 text-center text-xs font-medium text-gray-600 border border-gray-300 bg-[#f3f4f6] w-12">{rowIndex + 1}</td>
-                          {showPickColumn && (
+                  if (filteredRowEntries.length === 0) {
+                    return (
+                      <tr>
+                        <td colSpan={colSpanTotal} className="px-4 py-6 text-center text-gray-500 border border-gray-300">
+                          No rows match the search.
+                        </td>
+                      </tr>
+                    );
+                  }
+                  return paginatedRowEntries.map(({ row, templateIndex: rowIndex }) => {
+                    const pickT = getPickTemplateRowIndex(row);
+                    const lockedBy = showPickColumn && pickT !== null ? pickedByOthers[pickT] : null;
+                    return (
+                      <tr
+                        key={`r-${rowIndex}-${pickT ?? 'm'}`}
+                        className={lockedBy ? 'bg-gray-100 hover:bg-gray-200' : 'hover:bg-[#e8f4ea]'}
+                      >
+                        <td className="px-2 py-1 text-center text-xs font-medium text-gray-600 border border-gray-300 bg-[#f3f4f6] w-12">
+                          {rowIndex + 1}
+                        </td>
+                        {showPickColumn && (
+                          <td
+                            className={`px-2 py-1 text-center border border-gray-300 w-24 align-top ${lockedBy ? 'bg-gray-200' : pickT === null ? 'bg-gray-50' : 'bg-white'}`}
+                            title={
+                              pickT === null
+                                ? 'This row is not from the admin template — add from template rows to pick'
+                                : lockedBy
+                                  ? `Picked by: ${lockedBy.empName} (${lockedBy.empId}) — you cannot pick this row`
+                                  : undefined
+                            }
+                          >
+                            {pickT === null ? (
+                              <span className="text-[10px] text-gray-400">—</span>
+                            ) : (
+                              <PickCheckboxCell
+                                pickT={pickT}
+                                checked={pickedRowIndices.has(pickT)}
+                                lockedBy={lockedBy}
+                                onToggle={() => togglePick(rowIndex)}
+                              />
+                            )}
+                          </td>
+                        )}
+                        {columns.map((col) => {
+                          const isReadOnly = col.editable === false || isPickWorkspace;
+                          const minWidth = Math.max(100, Math.min(col.name.length * 8 + 40, 260));
+                          const displayText = formatCellValueForDisplay(row[col.name], col.type);
+                          return (
                             <td
-                              className={`px-2 py-1 text-center border border-gray-300 w-24 align-top ${lockedBy ? 'bg-gray-200' : pickT === null ? 'bg-gray-50' : 'bg-white'}`}
-                              title={
-                                pickT === null
-                                  ? 'This row is not from the admin template — add from template rows to pick'
-                                  : lockedBy
-                                    ? `Picked by: ${lockedBy.empName} (${lockedBy.empId}) — you cannot pick this row`
-                                    : undefined
-                              }
+                              key={col.name}
+                              className={`p-0 align-top ${isReadOnly ? 'bg-gray-50' : ''}`}
+                              style={{ minWidth: `${minWidth}px` }}
                             >
-                              {pickT === null ? (
-                                <span className="text-[10px] text-gray-400">—</span>
-                              ) : lockedBy ? (
-                                <span className="inline-flex items-center gap-1 text-gray-500 text-xs" title={`Picked by: ${lockedBy.empName} (${lockedBy.empId})`}>
-                                  <svg className="w-4 h-4 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20" aria-hidden="true">
-                                    <path fillRule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clipRule="evenodd" />
-                                  </svg>
-                                  <span className="hidden sm:inline">Locked</span>
+                              {isPickWorkspace ? (
+                                <span
+                                  className="block min-h-[28px] px-2 py-1 border-0 border-r border-b border-gray-300 text-sm text-gray-900 truncate max-w-[320px]"
+                                  title={displayText || col.name}
+                                >
+                                  {displayText || '\u00a0'}
                                 </span>
+                              ) : col.type === 'dropdown' && col.validation?.options ? (
+                                <select
+                                  value={row[col.name] || ''}
+                                  onChange={(e) => updateCell(rowIndex, col.name, e.target.value)}
+                                  className={`w-full h-full min-h-[28px] px-2 py-1 border-0 border-r border-b border-gray-300 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500 ${isReadOnly ? 'bg-gray-200 cursor-not-allowed' : 'bg-white'}`}
+                                  required={col.required}
+                                  disabled={isReadOnly}
+                                  title={isReadOnly ? 'Read-only' : ''}
+                                >
+                                  <option value="">Select...</option>
+                                  {col.validation.options.map((opt) => (
+                                    <option key={opt} value={opt}>
+                                      {opt}
+                                    </option>
+                                  ))}
+                                </select>
                               ) : (
                                 <input
-                                  type="checkbox"
-                                  checked={pickedRowIndices.has(pickT)}
-                                  onChange={() => togglePick(rowIndex)}
-                                  title="Pick this row"
-                                  className="h-4 w-4 cursor-pointer"
+                                  type={
+                                    col.type === 'number'
+                                      ? 'number'
+                                      : col.type === 'date'
+                                        ? 'date'
+                                        : col.type === 'email'
+                                          ? 'email'
+                                          : 'text'
+                                  }
+                                  value={col.type === 'date' ? toDateInputValue(row[col.name]) : (row[col.name] ?? '')}
+                                  onChange={(e) => updateCell(rowIndex, col.name, e.target.value)}
+                                  className={`w-full min-h-[28px] px-2 py-1 border-0 border-r border-b border-gray-300 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500 ${isReadOnly ? 'bg-gray-200 cursor-not-allowed' : 'bg-white'}`}
+                                  placeholder={col.name}
+                                  required={col.required}
+                                  disabled={isReadOnly}
+                                  readOnly={isReadOnly}
+                                  title={isReadOnly ? 'Read-only' : ''}
+                                  min={col.type === 'number' ? col.validation?.min : undefined}
+                                  max={col.type === 'number' ? col.validation?.max : undefined}
                                 />
                               )}
                             </td>
-                          )}
-                          {columns.map((col) => {
-                            const isReadOnly = col.editable === false;
-                            const minWidth = Math.max(100, Math.min(col.name.length * 8 + 40, 260));
-                            return (
-                              <td key={col.name} className={`p-0 align-top ${isReadOnly ? 'bg-gray-50' : ''}`} style={{ minWidth: `${minWidth}px` }}>
-                                {col.type === 'dropdown' && col.validation?.options ? (
-                                  <select
-                                    value={row[col.name] || ''}
-                                    onChange={(e) => updateCell(rowIndex, col.name, e.target.value)}
-                                    className={`w-full h-full min-h-[28px] px-2 py-1 border-0 border-r border-b border-gray-300 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500 ${isReadOnly ? 'bg-gray-200 cursor-not-allowed' : 'bg-white'}`}
-                                    required={col.required}
-                                    disabled={isReadOnly}
-                                    title={isReadOnly ? 'Read-only' : ''}
-                                  >
-                                    <option value="">Select...</option>
-                                    {col.validation.options.map(opt => (
-                                      <option key={opt} value={opt}>{opt}</option>
-                                    ))}
-                                  </select>
-                                ) : (
-                                  <input
-                                    type={col.type === 'number' ? 'number' : col.type === 'date' ? 'date' : col.type === 'email' ? 'email' : 'text'}
-                                    value={col.type === 'date' ? toDateInputValue(row[col.name]) : (row[col.name] ?? '')}
-                                    onChange={(e) => updateCell(rowIndex, col.name, e.target.value)}
-                                    className={`w-full min-h-[28px] px-2 py-1 border-0 border-r border-b border-gray-300 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500 ${isReadOnly ? 'bg-gray-200 cursor-not-allowed' : 'bg-white'}`}
-                                    placeholder={col.name}
-                                    required={col.required}
-                                    disabled={isReadOnly}
-                                    readOnly={isReadOnly}
-                                    title={isReadOnly ? 'Read-only' : ''}
-                                    min={col.type === 'number' ? col.validation?.min : undefined}
-                                    max={col.type === 'number' ? col.validation?.max : undefined}
-                                  />
-                                )}
-                              </td>
-                            );
-                          })}
-                        </tr>
-                      );
-                    })
-                  );
+                          );
+                        })}
+                      </tr>
+                    );
+                  });
                 })()}
               </tbody>
             </table>
           </div>
-          <p className="text-sm text-gray-500 mt-1">
-            {(() => {
-              const totalCount = rows.length;
-              const searchTrim = debouncedRowSearch.trim();
-              const matchedCount = searchTrim
-                ? rows.filter((r) => columns.some((col) => String(r[col.name] ?? '').toLowerCase().includes(searchTrim.toLowerCase()))).length
-                : totalCount;
-              return searchTrim
-                ? `Showing ${matchedCount} of ${totalCount} rows — scroll to see all`
-                : `${totalCount} row(s) — scroll to see all`;
-            })()}
+          {filteredRowEntries.length > TABLE_ROWS_PER_PAGE && (
+            <div className="mt-2 flex shrink-0 flex-wrap items-center justify-between gap-2 rounded-md border border-gray-200 bg-gray-50 px-3 py-2">
+              <span className="text-sm text-gray-700">
+                Rows {(tablePage - 1) * TABLE_ROWS_PER_PAGE + 1}–
+                {Math.min(tablePage * TABLE_ROWS_PER_PAGE, filteredRowEntries.length)} of{' '}
+                {filteredRowEntries.length}
+                {debouncedRowSearch.trim() ? ` (filtered from ${rows.length})` : ''}
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={tablePage <= 1}
+                  onClick={() => setTablePage((p) => Math.max(1, p - 1))}
+                  className="rounded border border-gray-300 bg-white px-3 py-1 text-sm hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Previous
+                </button>
+                <span className="text-sm text-gray-600">
+                  Page {tablePage} / {totalTablePages}
+                </span>
+                <button
+                  type="button"
+                  disabled={tablePage >= totalTablePages}
+                  onClick={() => setTablePage((p) => Math.min(totalTablePages, p + 1))}
+                  className="rounded border border-gray-300 bg-white px-3 py-1 text-sm hover:bg-gray-100 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Next
+                </button>
+              </div>
+            </div>
+          )}
+          <p className="text-sm text-gray-500 mt-1 shrink-0">
+            {debouncedRowSearch.trim()
+              ? `Showing ${filteredRowEntries.length} of ${rows.length} rows`
+              : `${rows.length} row(s)`}
+            {pickedRowIndices.size > 0 && isPickWorkspace ? ` · ${pickedRowIndices.size} picked` : ''}
           </p>
           <div
-            className={`flex justify-end gap-2 flex-wrap mt-2 pt-2 border-t border-gray-200 bg-white ${currentEditingFileId ? 'sticky bottom-0 z-30 py-3 -mx-1 px-1 shadow-[0_-2px_8px_rgba(0,0,0,0.06)]' : 'relative z-10'}`}
+            className={`flex shrink-0 justify-end gap-2 flex-wrap mt-2 pt-2 border-t border-gray-200 bg-white ${
+              fullPage || currentEditingFileId
+                ? 'sticky bottom-0 z-30 py-3 shadow-[0_-2px_8px_rgba(0,0,0,0.06)]'
+                : 'relative z-10'
+            }`}
             onClick={(e) => e.stopPropagation()}
             role="toolbar"
             aria-label="Row actions"
@@ -1594,7 +1745,7 @@ export default function ExcelCreator({
               </>
             )}
           </div>
-        </>
+        </div>
       )}
       {showAddFromFileModal && templateRows.length > 0 && (() => {
         const searchTrim = addFromFileSearchDebounced.trim().toLowerCase();

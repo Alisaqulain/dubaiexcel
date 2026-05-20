@@ -17,6 +17,17 @@ import {
 
 type MergeMode = 'rowsOnly' | 'fullTemplate';
 
+function buildColumnTypesFromFormat(
+  columns: { name: string; type?: string }[] | undefined
+): Record<string, string> {
+  const m: Record<string, string> = {};
+  for (const c of columns || []) {
+    const name = String(c.name || '').trim();
+    if (name) m[name] = String(c.type || 'text');
+  }
+  return m;
+}
+
 function stripRowIds(row: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(row)) {
@@ -108,6 +119,7 @@ async function handlePost(req: AuthenticatedRequest) {
     if (mode === 'rowsOnly') {
       const mergeResult = mergeDailyFileRows(sortedDocs as Parameters<typeof mergeDailyFileRows>[0]);
       const columnOrder = mergeResult.columnOrder;
+      const columnTypes = buildColumnTypesFromFormat((fmt as { columns?: { name: string; type?: string }[] }).columns);
       if (download) {
         const buf = buildMergeXlsxBuffer(mergeResult.rows, columnOrder, 'Merged_rows');
         const safe = String((fmt as { name?: string }).name || 'merge')
@@ -126,6 +138,7 @@ async function handlePost(req: AuthenticatedRequest) {
         data: {
           mode,
           columns: columnOrder.filter((c) => !c.startsWith('_')),
+          columnTypes,
           rows,
           rowCount: rows.length,
         },
@@ -170,12 +183,14 @@ async function handlePost(req: AuthenticatedRequest) {
     }
 
     const rowsOut = rows.map((row) => stripRowIds(row as Record<string, unknown>));
+    const columnTypes = buildColumnTypesFromFormat((fmt as { columns?: { name: string; type?: string }[] }).columns);
     return NextResponse.json({
       success: true,
       data: {
         mode,
         formatName: (fmt as { name?: string }).name || '',
         columns: columnOrder.filter((c) => c !== ROW_SOURCE_FILE_ID && !c.startsWith('_')),
+        columnTypes,
         rows: rowsOut,
         rowCount: rowsOut.length,
       },

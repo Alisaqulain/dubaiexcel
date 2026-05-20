@@ -6,6 +6,7 @@ import Navigation from '../../components/Navigation';
 import { useAuth } from '../../context/AuthContext';
 import { highlightAllSearchMatches } from '../../components/HighlightSearch';
 import { useDebounce, SEARCH_DEBOUNCE_MS } from '@/lib/useDebounce';
+import { guessDefaultUniqueColumnName } from '@/lib/formatColumnUtils';
 import * as XLSX from 'xlsx';
 
 function getColumnLetter(index: number): string {
@@ -145,6 +146,8 @@ function ExcelFormatsComponent() {
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploadResult, setUploadResult] = useState<any>(null);
   const [uploadSaving, setUploadSaving] = useState(false);
+  const [uploadMode, setUploadMode] = useState<'replace' | 'append'>('replace');
+  const [uploadUniqueColumn, setUploadUniqueColumn] = useState('');
   const [importedRowData, setImportedRowData] = useState<Record<string, any>[]>([]); // Store imported row data
   const [dropdownInputs, setDropdownInputs] = useState<{ [key: number]: string }>({}); // Track raw dropdown input values
   const [viewingFormatId, setViewingFormatId] = useState<string | null>(null);
@@ -1062,6 +1065,11 @@ function ExcelFormatsComponent() {
       return;
     }
 
+    if (uploadMode === 'append' && !uploadUniqueColumn) {
+      alert('Choose a unique column (e.g. EMP ID) to skip duplicate rows when appending.');
+      return;
+    }
+
     setUploadSaving(true);
     try {
       const buffer = await uploadFile.arrayBuffer();
@@ -1085,16 +1093,30 @@ function ExcelFormatsComponent() {
           Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ formatId, rows }),
+        body: JSON.stringify({
+          formatId,
+          rows,
+          mode: uploadMode,
+          ...(uploadMode === 'append' ? { uniqueKeyColumn: uploadUniqueColumn } : {}),
+        }),
       });
 
       const result = await response.json();
       setUploadResult(result);
 
       if (result.success) {
-        alert(
-          `Master sheet saved (${rows.length} rows). Employees assigned to this format can open it and pick rows.`
-        );
+        const skipped = result.data?.skippedDuplicates ?? 0;
+        const total = result.data?.rowsCount ?? rows.length;
+        if (uploadMode === 'append') {
+          const added = result.data?.addedCount ?? rows.length - skipped;
+          alert(
+            `Appended ${added} row(s). Total template rows: ${total}.${skipped ? ` Skipped ${skipped} duplicate(s) on unique columns.` : ''}`
+          );
+        } else {
+          alert(
+            `Master sheet saved (${total} rows). Employees assigned to this format can open it and pick rows.`
+          );
+        }
         setUploadingFormat(null);
         setUploadFile(null);
       } else {
@@ -1783,6 +1805,8 @@ function ExcelFormatsComponent() {
                                 setUploadingFormat(format._id);
                                 setUploadResult(null);
                                 setUploadFile(null);
+                                setUploadMode('replace');
+                                setUploadUniqueColumn(guessDefaultUniqueColumnName(format.columns));
                               }}
                               className="text-purple-600 hover:text-purple-900 text-xs"
                               title="Upload complete master sheet (rows + columns) for employee row picking"
@@ -1810,9 +1834,56 @@ function ExcelFormatsComponent() {
             <div className="border-b border-gray-200 px-5 py-4">
               <h2 className="text-lg font-semibold text-gray-900">Upload master sheet</h2>
               <p className="mt-1 text-sm text-gray-600">
-                {formats.find((f) => f._id === uploadingFormat)?.name ?? 'Format'} — first row must match format column
-                names. This replaces the stored template rows employees pick from.
+                {formats.find((f) => f._id === uploadingFormat)?.name ?? 'Format'} — first row must match format
+                column names.
               </p>
+              <div className="mt-3 space-y-2 text-sm">
+                <label className="flex items-center gap-2">
+                  <input
+                    type="radio"
+                    name="uploadMode"
+                    checked={uploadMode === 'replace'}
+                    onChange={() => setUploadMode('replace')}
+                  />
+                  <span>
+                    <strong>Replace</strong> entire master sheet
+                  </span>
+                </label>
+                <label className="flex items-center gap-2">
+                  <input
+                    type="radio"
+                    name="uploadMode"
+                    checked={uploadMode === 'append'}
+                    onChange={() => setUploadMode('append')}
+                  />
+                  <span>
+                    <strong>Append</strong> rows — skip duplicates on chosen unique column
+                  </span>
+                </label>
+              </div>
+              {uploadMode === 'append' && uploadingFormat && (
+                <label className="mt-3 block text-sm">
+                  <span className="font-medium text-gray-800">
+                    Unique column <span className="text-red-600">*</span>
+                  </span>
+                  <select
+                    value={uploadUniqueColumn}
+                    onChange={(e) => setUploadUniqueColumn(e.target.value)}
+                    className="mt-1 w-full rounded-md border border-gray-300 px-2 py-1.5 text-sm"
+                  >
+                    <option value="">— Select column —</option>
+                    {(formats.find((f) => f._id === uploadingFormat)?.columns || []).map((c) => (
+                      <option key={c.name} value={c.name}>
+                        {c.name}
+                        {c.unique ? ' (marked unique)' : ''}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="mt-1 block text-xs text-gray-500">
+                    If Excel row has same value (e.g. ID 11) as an existing row, it will not be added.
+                  </span>
+                </label>
+              )}
             </div>
             <div className="space-y-4 px-5 py-4">
               <input
@@ -1838,6 +1909,8 @@ function ExcelFormatsComponent() {
                   setUploadingFormat(null);
                   setUploadFile(null);
                   setUploadResult(null);
+                  setUploadMode('replace');
+                  setUploadUniqueColumn('');
                 }}
                 className="rounded-md bg-gray-200 px-4 py-2 text-sm font-medium text-gray-800 hover:bg-gray-300 disabled:opacity-50"
               >
@@ -1845,11 +1918,15 @@ function ExcelFormatsComponent() {
               </button>
               <button
                 type="button"
-                disabled={uploadSaving || !uploadFile}
+                disabled={
+                  uploadSaving ||
+                  !uploadFile ||
+                  (uploadMode === 'append' && !uploadUniqueColumn)
+                }
                 onClick={() => handleUploadFormat(uploadingFormat)}
                 className="rounded-md bg-purple-600 px-4 py-2 text-sm font-medium text-white hover:bg-purple-700 disabled:opacity-50"
               >
-                {uploadSaving ? 'Saving…' : 'Save master sheet'}
+                {uploadSaving ? 'Saving…' : uploadMode === 'append' ? 'Append rows' : 'Save master sheet'}
               </button>
             </div>
           </div>

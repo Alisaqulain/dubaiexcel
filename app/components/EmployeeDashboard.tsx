@@ -371,6 +371,88 @@ export default function EmployeeDashboard() {
     setActiveTab('formats');
   };
 
+  const closeExcelWorkspace = () => {
+    setShowExcelCreator(false);
+    setSelectedFormat(null);
+    setEditingFileId(null);
+    setEditingFileName(null);
+    setEditingFilePickedIndices(undefined);
+    setFileData([]);
+    setPickWorkspacePremerged(false);
+  };
+
+  if (showExcelCreator && selectedFormat) {
+    return (
+      <div className="fixed inset-0 z-[60] flex flex-col bg-slate-100">
+        <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-gray-200 bg-white px-4 py-3 shadow-sm">
+          <div className="min-w-0">
+            <h1 className="text-lg font-semibold text-gray-900">Create Excel File</h1>
+            <p className="truncate text-sm text-gray-600">
+              Format: <strong>{selectedFormat.name}</strong>
+            </p>
+            {!editingFileId && (
+              <p className="mt-1 text-xs text-amber-800">
+                Admin sheet — pick rows, then <strong>Save my pick</strong>. Saved files are under <strong>My data</strong>.
+              </p>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={closeExcelWorkspace}
+            className="shrink-0 rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-800 hover:bg-gray-50"
+          >
+            ← Close
+          </button>
+        </header>
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-2">
+          <ExcelCreator
+            key={`${selectedFormat._id}-${editingFileId || 'new'}`}
+            fullPage
+            labourType="OUR_LABOUR"
+            useCustomFormat={true}
+            formatId={selectedFormat._id}
+            editingFileId={editingFileId || undefined}
+            initialData={fileData.length > 0 ? fileData : undefined}
+            workspaceDataPremerged={pickWorkspacePremerged}
+            myDataDailySave={myDataDailySave}
+            onMyDataDailyFileSaved={(id, filename) => {
+              setEditingFileId(id);
+              setEditingFileName(filename);
+              setEditingFilePickedIndices(undefined);
+            }}
+            onFileCreated={(file) => {
+              setCreatedFile(file);
+            }}
+            onSaveSuccess={async () => {
+              await fetchMyCreatedFiles({ silent: true });
+              setMessage({
+                type: 'success',
+                text: 'List updated. Picks and day files are under the My data tab.',
+              });
+            }}
+            onSaveAndClose={() => {
+              const fileIsPickWorkflow =
+                !!(editingFileId &&
+                  Array.isArray(editingFilePickedIndices) &&
+                  editingFilePickedIndices.length > 0);
+              closeExcelWorkspace();
+              setActiveTab('mydata');
+              void fetchMyCreatedFiles({ silent: true });
+              setMessage({
+                type: 'success',
+                text: fileIsPickWorkflow
+                  ? 'Workspace closed. Your pick is under My data.'
+                  : 'Workspace closed. Your files are under My data.',
+              });
+            }}
+            editingFileName={editingFileName || undefined}
+            initialPickedTemplateRowIndices={editingFilePickedIndices}
+          />
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-gray-50 p-6">
       <div className="max-w-7xl mx-auto">
@@ -686,87 +768,6 @@ export default function EmployeeDashboard() {
           )}
         </div>
         </>
-        )}
-
-        {/* Excel Creator - shown when "Work with this" / Edit opens the workspace */}
-        {showExcelCreator && selectedFormat && (
-          <div className="bg-white rounded-lg shadow p-6 mb-6">
-            <div className="flex justify-between items-center mb-4">
-              <div>
-                <h2 className="text-xl font-semibold">Create Excel File</h2>
-                <p className="text-sm text-gray-600 mt-1">
-                  Working with format: <strong>{selectedFormat.name}</strong>
-                </p>
-                {!editingFileId && (
-                  <p className="text-xs text-amber-800 bg-amber-50 border border-amber-100 rounded px-2 py-1.5 mt-2 max-w-3xl">
-                    This is the <strong>admin-uploaded sheet</strong> (pick rows, then Save my pick). Files you already saved are opened from the <strong>My data</strong> tab.
-                  </p>
-                )}
-              </div>
-              <button
-                onClick={() => {
-                  setShowExcelCreator(false);
-                  setSelectedFormat(null);
-                  setEditingFileId(null);
-                  setEditingFileName(null);
-                  setEditingFilePickedIndices(undefined);
-                  setFileData([]);
-                  setPickWorkspacePremerged(false);
-                }}
-                className="px-4 py-2 text-gray-600 hover:text-gray-800 border border-gray-300 rounded-md"
-              >
-                Close
-              </button>
-            </div>
-            <ExcelCreator 
-              key={`${selectedFormat._id}-${editingFileId || 'new'}`}
-              labourType="OUR_LABOUR"
-              useCustomFormat={true}
-              formatId={selectedFormat._id}
-              editingFileId={editingFileId || undefined}
-              initialData={fileData.length > 0 ? fileData : undefined}
-              workspaceDataPremerged={pickWorkspacePremerged}
-              myDataDailySave={myDataDailySave}
-              onMyDataDailyFileSaved={(id, filename) => {
-                setEditingFileId(id);
-                setEditingFileName(filename);
-                setEditingFilePickedIndices(undefined);
-              }}
-              onFileCreated={(file) => {
-                setCreatedFile(file);
-              }}
-              onSaveSuccess={async () => {
-                await fetchMyCreatedFiles({ silent: true });
-                setMessage({
-                  type: 'success',
-                  text: 'List updated. Picks and day files are under the My data tab.',
-                });
-              }}
-              onSaveAndClose={() => {
-                const fileIsPickWorkflow =
-                  !!(editingFileId &&
-                    Array.isArray(editingFilePickedIndices) &&
-                    editingFilePickedIndices.length > 0);
-                setShowExcelCreator(false);
-                setSelectedFormat(null);
-                setEditingFileId(null);
-                setEditingFileName(null);
-                setEditingFilePickedIndices(undefined);
-                setFileData([]);
-                setPickWorkspacePremerged(false);
-                setActiveTab('mydata');
-                void fetchMyCreatedFiles({ silent: true });
-                setMessage({
-                  type: 'success',
-                  text: fileIsPickWorkflow
-                    ? 'Workspace closed. Your pick is under My data.'
-                    : 'Workspace closed. Your files are under My data.',
-                });
-              }}
-              editingFileName={editingFileName || undefined}
-              initialPickedTemplateRowIndices={editingFilePickedIndices}
-            />
-          </div>
         )}
 
       </div>
