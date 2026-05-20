@@ -18,6 +18,74 @@ function getColumnLetter(index: number): string {
   return s;
 }
 
+/** Map an Excel file buffer to format column keys (first row = headers). */
+function parseExcelBufferToFormatRows(
+  buffer: ArrayBuffer,
+  formatColumns: Column[]
+): { rows: Record<string, string>[]; missingColumns: string[] } {
+  const data = new Uint8Array(buffer);
+  const workbook = XLSX.read(data, { type: 'array' });
+  const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+  const allData = XLSX.utils.sheet_to_json(firstSheet, { header: 1, defval: '', raw: false }) as unknown[][];
+
+  if (allData.length < 2) {
+    throw new Error('Excel file must have a header row and at least one data row');
+  }
+
+  const excelHeaders = (allData[0] as unknown[]).map((h) => String(h ?? '').trim());
+  const sortedColumns = [...formatColumns].sort((a, b) => a.order - b.order);
+  const columnMapping: Record<string, number> = {};
+  const missingColumns: string[] = [];
+
+  sortedColumns.forEach((col) => {
+    const index = excelHeaders.findIndex(
+      (h) =>
+        h.toLowerCase() === col.name.toLowerCase() ||
+        h.replace(/\s+/g, '').toLowerCase() === col.name.replace(/\s+/g, '').toLowerCase()
+    );
+    if (index !== -1) {
+      columnMapping[col.name] = index;
+    } else if (col.required) {
+      missingColumns.push(col.name);
+    }
+  });
+
+  const rows = allData
+    .slice(1)
+    .filter(
+      (row) =>
+        row &&
+        row.length > 0 &&
+        row.some((cell) => cell !== '' && cell !== null && cell !== undefined)
+    )
+    .map((row) => {
+      const newRow: Record<string, string> = {};
+      sortedColumns.forEach((col) => {
+        const excelIndex = columnMapping[col.name];
+        if (
+          excelIndex !== undefined &&
+          excelIndex !== -1 &&
+          row[excelIndex] !== undefined &&
+          row[excelIndex] !== null &&
+          row[excelIndex] !== ''
+        ) {
+          let val = String(row[excelIndex]).trim();
+          if (col.type === 'dropdown' && col.validation?.options?.length) {
+            const optionsLower = col.validation.options.map((o) => String(o).trim().toLowerCase());
+            const optionIndex = optionsLower.indexOf(val.toLowerCase());
+            val = optionIndex !== -1 ? col.validation.options[optionIndex] : '';
+          }
+          newRow[col.name] = val;
+        } else {
+          newRow[col.name] = '';
+        }
+      });
+      return newRow;
+    });
+
+  return { rows, missingColumns };
+}
+
 interface Column {
   name: string;
   type: 'text' | 'number' | 'date' | 'email' | 'dropdown';
@@ -76,6 +144,7 @@ function ExcelFormatsComponent() {
   const [uploadingFormat, setUploadingFormat] = useState<string | null>(null);
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploadResult, setUploadResult] = useState<any>(null);
+  const [uploadSaving, setUploadSaving] = useState(false);
   const [importedRowData, setImportedRowData] = useState<Record<string, any>[]>([]); // Store imported row data
   const [dropdownInputs, setDropdownInputs] = useState<{ [key: number]: string }>({}); // Track raw dropdown input values
   const [viewingFormatId, setViewingFormatId] = useState<string | null>(null);
@@ -987,33 +1056,54 @@ function ExcelFormatsComponent() {
       return;
     }
 
-    try {
-      const formData = new FormData();
-      formData.append('file', uploadFile);
+    const format = formats.find((f) => f._id === formatId);
+    if (!format) {
+      alert('Format not found');
+      return;
+    }
 
-      const response = await fetch(`/api/admin/excel-formats/${formatId}/upload`, {
+    setUploadSaving(true);
+    try {
+      const buffer = await uploadFile.arrayBuffer();
+      const { rows, missingColumns } = parseExcelBufferToFormatRows(buffer, format.columns);
+
+      if (rows.length === 0) {
+        alert('No data rows found. Ensure the first row has column headers matching this format.');
+        return;
+      }
+
+      if (missingColumns.length > 0) {
+        const proceed = confirm(
+          `Some required columns are missing in the file: ${missingColumns.join(', ')}\n\nContinue and save ${rows.length} rows anyway?`
+        );
+        if (!proceed) return;
+      }
+
+      const response = await fetch('/api/admin/excel-formats/save-template-data', {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${token}` },
-        body: formData,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ formatId, rows }),
       });
 
       const result = await response.json();
       setUploadResult(result);
 
       if (result.success) {
-        if (result.data.isValid) {
-          alert('File validated successfully!');
-        } else {
-          alert('File validation completed with errors. Please check the details below.');
-        }
+        alert(
+          `Master sheet saved (${rows.length} rows). Employees assigned to this format can open it and pick rows.`
+        );
+        setUploadingFormat(null);
+        setUploadFile(null);
       } else {
-        alert(result.error || 'Failed to upload and validate file');
+        alert(result.error || 'Failed to save master sheet');
       }
     } catch (err: any) {
       alert(err.message || 'Failed to upload file');
     } finally {
-      setUploadingFormat(null);
-      setUploadFile(null);
+      setUploadSaving(false);
     }
   };
 
@@ -1190,11 +1280,16 @@ function ExcelFormatsComponent() {
           </div>
         </div>
 
-        {/* Upload Excel to Create Format — disabled for now (re-enable when imports should be allowed again)
+        <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-4 mb-6 text-sm text-emerald-900">
+          <strong>Admin sheet → employee pick flow:</strong> Create a format (or import from Excel below), then use{' '}
+          <strong>Upload master sheet</strong> on each format to store the full HR/template rows. Employees open the format
+          on their dashboard, pick rows in the Pick column, and save their pick.
+        </div>
+
         <div className="bg-white rounded-lg shadow p-6 mb-6">
           <h2 className="text-xl font-semibold mb-4">Import Format from Excel</h2>
           <p className="text-sm text-gray-600 mb-4">
-            Upload an Excel file to automatically create a format. The first row should contain column names. 
+            Upload an Excel file to automatically create a format. The first row should contain column names.
             All columns will be set as <strong>text type</strong>. You can configure editable/read-only permissions for each column after import.
           </p>
           <input
@@ -1204,7 +1299,6 @@ function ExcelFormatsComponent() {
             className="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-purple-50 file:text-purple-700 hover:file:bg-purple-100"
           />
         </div>
-        */}
 
         {showForm && (
           <div className="bg-white rounded-lg shadow p-6 mb-6">
@@ -1691,8 +1785,9 @@ function ExcelFormatsComponent() {
                                 setUploadFile(null);
                               }}
                               className="text-purple-600 hover:text-purple-900 text-xs"
+                              title="Upload complete master sheet (rows + columns) for employee row picking"
                             >
-                              Upload Excel
+                              Upload master sheet
                             </button>
                           </div>
                         </div>
@@ -1704,6 +1799,62 @@ function ExcelFormatsComponent() {
             </div>
           )}
         </div>
+
+      {uploadingFormat && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          role="dialog"
+          aria-modal="true"
+        >
+          <div className="w-full max-w-lg rounded-lg bg-white shadow-xl">
+            <div className="border-b border-gray-200 px-5 py-4">
+              <h2 className="text-lg font-semibold text-gray-900">Upload master sheet</h2>
+              <p className="mt-1 text-sm text-gray-600">
+                {formats.find((f) => f._id === uploadingFormat)?.name ?? 'Format'} — first row must match format column
+                names. This replaces the stored template rows employees pick from.
+              </p>
+            </div>
+            <div className="space-y-4 px-5 py-4">
+              <input
+                type="file"
+                accept=".xlsx,.xls"
+                onChange={(e) => setUploadFile(e.target.files?.[0] ?? null)}
+                className="block w-full text-sm text-gray-500 file:mr-4 file:rounded-md file:border-0 file:bg-purple-50 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-purple-700 hover:file:bg-purple-100"
+              />
+              {uploadFile && (
+                <p className="text-sm text-gray-700">
+                  Selected: <strong>{uploadFile.name}</strong>
+                </p>
+              )}
+              {uploadResult?.success === false && (
+                <p className="text-sm text-red-600">{uploadResult.error || 'Upload failed'}</p>
+              )}
+            </div>
+            <div className="flex justify-end gap-2 border-t border-gray-200 px-5 py-4">
+              <button
+                type="button"
+                disabled={uploadSaving}
+                onClick={() => {
+                  setUploadingFormat(null);
+                  setUploadFile(null);
+                  setUploadResult(null);
+                }}
+                className="rounded-md bg-gray-200 px-4 py-2 text-sm font-medium text-gray-800 hover:bg-gray-300 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={uploadSaving || !uploadFile}
+                onClick={() => handleUploadFormat(uploadingFormat)}
+                className="rounded-md bg-purple-600 px-4 py-2 text-sm font-medium text-white hover:bg-purple-700 disabled:opacity-50"
+              >
+                {uploadSaving ? 'Saving…' : 'Save master sheet'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       </div>
       )}

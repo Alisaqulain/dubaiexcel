@@ -42,6 +42,52 @@ function labourLabel(code: string): string {
   }
 }
 
+type ColumnAnalysis = {
+  total: number;
+  present: number;
+  absent: number;
+  presentPct: number;
+  absentPct: number;
+  valueCounts: { value: string; count: number }[];
+};
+
+function cellHasValue(val: unknown): boolean {
+  if (val === null || val === undefined) return false;
+  return String(val).trim() !== '';
+}
+
+function analyzeColumn(rows: Record<string, unknown>[], column: string): ColumnAnalysis {
+  let present = 0;
+  let absent = 0;
+  const counts = new Map<string, number>();
+
+  for (const row of rows) {
+    const val = row[column];
+    if (cellHasValue(val)) {
+      present++;
+      const key = String(val).trim();
+      counts.set(key, (counts.get(key) || 0) + 1);
+    } else {
+      absent++;
+      counts.set('(empty)', (counts.get('(empty)') || 0) + 1);
+    }
+  }
+
+  const total = rows.length;
+  const valueCounts = Array.from(counts.entries())
+    .map(([value, count]) => ({ value, count }))
+    .sort((a, b) => b.count - a.count);
+
+  return {
+    total,
+    present,
+    absent,
+    presentPct: total ? Math.round((present / total) * 1000) / 10 : 0,
+    absentPct: total ? Math.round((absent / total) * 1000) / 10 : 0,
+    valueCounts,
+  };
+}
+
 function stripInternalColumns(
   rows: Record<string, unknown>[],
   preferredOrder: string[]
@@ -100,12 +146,18 @@ function UserSavedFilesWizard() {
 
   const [previewLoading, setPreviewLoading] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
-  const [preview, setPreview] = useState<{
+  const [fullView, setFullView] = useState<{
     title: string;
     subtitle?: string;
     columns: string[];
     rows: Record<string, unknown>[];
   } | null>(null);
+
+  const [analysisLoading, setAnalysisLoading] = useState(false);
+  const [analysisRows, setAnalysisRows] = useState<Record<string, unknown>[]>([]);
+  const [analysisColumns, setAnalysisColumns] = useState<string[]>([]);
+  const [analysisColumn, setAnalysisColumn] = useState('');
+  const [fullViewAnalysisColumn, setFullViewAnalysisColumn] = useState('');
 
   useEffect(() => {
     if (step !== 2 || !token) return;
@@ -195,12 +247,13 @@ function UserSavedFilesWizard() {
       const rawRows = (json.data?.data || []) as Record<string, unknown>[];
       const preferredOrder = (json.data?.columnOrder as string[] | undefined) || [];
       const { rows, columns } = stripInternalColumns(rawRows, preferredOrder);
-      setPreview({
+      setFullView({
         title: filename,
         subtitle: 'Single employee save (expanded to full sheet when applicable)',
         columns,
         rows,
       });
+      setFullViewAnalysisColumn(columns[0] || '');
     } catch (e: unknown) {
       alert(e instanceof Error ? e.message : 'Failed to open');
     } finally {
@@ -278,7 +331,7 @@ function UserSavedFilesWizard() {
       const cols = (json.data?.columns as string[]) || [];
       const { rows, columns } = stripInternalColumns(rawRows, cols);
       const fmtName = formats.find((f) => f._id === formatId)?.name || 'Format';
-      setPreview({
+      setFullView({
         title:
           mode === 'fullTemplate'
             ? `Merged full sheet — ${fmtName}`
@@ -290,12 +343,83 @@ function UserSavedFilesWizard() {
         columns,
         rows,
       });
+      setFullViewAnalysisColumn(columns[0] || '');
     } catch (e: unknown) {
       alert(e instanceof Error ? e.message : 'Merge failed');
     } finally {
       setActionLoading(false);
     }
   };
+
+  const loadAnalysis = async () => {
+    if (!token || selectedIds.length === 0) {
+      alert('Select at least one file.');
+      return;
+    }
+    setAnalysisLoading(true);
+    try {
+      const res = await fetch('/api/admin/merge-selected-saves', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          formatId,
+          date,
+          fileIds: selectedIds,
+          mode: 'rowsOnly',
+          download: false,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok || !json.success) throw new Error(json.error || 'Failed to load data for analysis');
+      const rawRows = (json.data?.rows || []) as Record<string, unknown>[];
+      const cols = (json.data?.columns as string[]) || [];
+      const { rows, columns } = stripInternalColumns(rawRows, cols);
+      setAnalysisRows(rows);
+      setAnalysisColumns(columns);
+      setAnalysisColumn(columns[0] || '');
+    } catch (e: unknown) {
+      alert(e instanceof Error ? e.message : 'Analysis failed');
+      setAnalysisRows([]);
+      setAnalysisColumns([]);
+      setAnalysisColumn('');
+    } finally {
+      setAnalysisLoading(false);
+    }
+  };
+
+  const step3Analysis = useMemo(
+    () => (analysisColumn && analysisRows.length ? analyzeColumn(analysisRows, analysisColumn) : null),
+    [analysisColumn, analysisRows]
+  );
+
+  const fullViewAnalysis = useMemo(
+    () =>
+      fullView && fullViewAnalysisColumn && fullView.rows.length
+        ? analyzeColumn(fullView.rows, fullViewAnalysisColumn)
+        : null,
+    [fullView, fullViewAnalysisColumn]
+  );
+
+  if (fullView) {
+    return (
+      <FullPageDataView
+        title={fullView.title}
+        subtitle={fullView.subtitle}
+        columns={fullView.columns}
+        rows={fullView.rows}
+        analysisColumn={fullViewAnalysisColumn}
+        onAnalysisColumnChange={setFullViewAnalysisColumn}
+        analysis={fullViewAnalysis}
+        onBack={() => {
+          setFullView(null);
+          setFullViewAnalysisColumn('');
+        }}
+      />
+    );
+  }
 
   return (
     <div className="mx-auto flex w-full max-w-[1100px] flex-col gap-4 p-4">
@@ -470,6 +594,45 @@ function UserSavedFilesWizard() {
             </button>
           </div>
 
+          {selectedIds.length > 0 && (
+            <div className="rounded-lg border border-indigo-200 bg-white p-4 shadow-sm">
+              <h3 className="text-sm font-semibold text-gray-900">Column analysis (selected files)</h3>
+              <p className="mt-1 text-xs text-gray-600">
+                Combines rows from {selectedIds.length} selected file{selectedIds.length !== 1 ? 's' : ''}. Pick a
+                column to see how many cells are filled vs empty, and a breakdown of values.
+              </p>
+              <div className="mt-3 flex flex-wrap items-end gap-3">
+                <button
+                  type="button"
+                  disabled={analysisLoading}
+                  onClick={() => void loadAnalysis()}
+                  className="rounded-md bg-indigo-600 px-3 py-2 text-xs font-medium text-white hover:bg-indigo-700 disabled:opacity-50"
+                >
+                  {analysisLoading ? 'Loading…' : analysisRows.length ? 'Refresh analysis' : 'Load analysis'}
+                </button>
+                {analysisColumns.length > 0 && (
+                  <label className="flex flex-col gap-1 text-xs text-gray-700">
+                    <span className="font-medium">Column</span>
+                    <select
+                      value={analysisColumn}
+                      onChange={(e) => setAnalysisColumn(e.target.value)}
+                      className="min-w-[200px] rounded-md border border-gray-300 px-2 py-1.5 text-sm"
+                    >
+                      {analysisColumns.map((c) => (
+                        <option key={c} value={c}>
+                          {c}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+              </div>
+              {step3Analysis && (
+                <AnalysisSummary analysis={step3Analysis} columnName={analysisColumn} />
+              )}
+            </div>
+          )}
+
           <div className="overflow-auto rounded-lg border border-gray-200 bg-white shadow-sm">
             <table className="min-w-full border-collapse text-sm">
               <thead>
@@ -546,56 +709,180 @@ function UserSavedFilesWizard() {
         </section>
       )}
 
-      {preview && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-          role="dialog"
-          aria-modal="true"
-        >
-          <div className="flex max-h-[90vh] w-full max-w-[1200px] flex-col overflow-hidden rounded-lg bg-white shadow-xl">
-            <div className="flex items-center justify-between border-b border-gray-200 px-4 py-3">
-              <div>
-                <h2 className="text-sm font-semibold text-gray-900">{preview.title}</h2>
-                {preview.subtitle && <p className="text-xs text-gray-600">{preview.subtitle}</p>}
-              </div>
-              <button
-                type="button"
-                onClick={() => setPreview(null)}
-                className="rounded bg-gray-200 px-3 py-1.5 text-xs font-medium text-gray-900 hover:bg-gray-300"
-              >
-                Close
-              </button>
-            </div>
-            <div className="min-h-0 flex-1 overflow-auto">
-              <table className="min-w-max border-collapse text-xs">
-                <thead className="sticky top-0 bg-slate-900 text-white">
-                  <tr>
-                    {preview.columns.map((c) => (
-                      <th key={c} className="border border-slate-800 px-2 py-1.5 text-left font-semibold">
-                        {c}
-                      </th>
-                    ))}
+    </div>
+  );
+}
+
+function AnalysisSummary({ analysis, columnName }: { analysis: ColumnAnalysis; columnName: string }) {
+  return (
+    <div className="mt-4 space-y-3">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <div className="rounded-md border border-gray-200 bg-slate-50 px-3 py-2">
+          <div className="text-[10px] uppercase tracking-wide text-gray-500">Total rows</div>
+          <div className="text-lg font-semibold text-gray-900">{analysis.total}</div>
+        </div>
+        <div className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2">
+          <div className="text-[10px] uppercase tracking-wide text-emerald-700">Present (filled)</div>
+          <div className="text-lg font-semibold text-emerald-900">
+            {analysis.present}{' '}
+            <span className="text-sm font-normal text-emerald-700">({analysis.presentPct}%)</span>
+          </div>
+        </div>
+        <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2">
+          <div className="text-[10px] uppercase tracking-wide text-amber-700">Absent (empty)</div>
+          <div className="text-lg font-semibold text-amber-900">
+            {analysis.absent}{' '}
+            <span className="text-sm font-normal text-amber-700">({analysis.absentPct}%)</span>
+          </div>
+        </div>
+        <div className="rounded-md border border-indigo-200 bg-indigo-50 px-3 py-2">
+          <div className="text-[10px] uppercase tracking-wide text-indigo-700">Unique values</div>
+          <div className="text-lg font-semibold text-indigo-900">{analysis.valueCounts.length}</div>
+        </div>
+      </div>
+      {analysis.valueCounts.length > 0 && (
+        <div>
+          <h4 className="mb-2 text-xs font-semibold text-gray-800">
+            Value breakdown — <span className="font-normal text-gray-600">{columnName}</span>
+          </h4>
+          <div className="max-h-48 overflow-auto rounded-md border border-gray-200">
+            <table className="min-w-full border-collapse text-xs">
+              <thead className="sticky top-0 bg-gray-100">
+                <tr>
+                  <th className="border-b border-gray-200 px-3 py-1.5 text-left font-semibold text-gray-700">
+                    Value
+                  </th>
+                  <th className="border-b border-gray-200 px-3 py-1.5 text-right font-semibold text-gray-700">
+                    Count
+                  </th>
+                  <th className="border-b border-gray-200 px-3 py-1.5 text-right font-semibold text-gray-700">
+                    %
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {analysis.valueCounts.map(({ value, count }) => (
+                  <tr key={value} className="border-b border-gray-100 hover:bg-slate-50">
+                    <td className="max-w-[320px] break-words px-3 py-1.5 text-gray-900">
+                      {value === '(empty)' ? (
+                        <span className="italic text-amber-700">(empty)</span>
+                      ) : (
+                        value
+                      )}
+                    </td>
+                    <td className="px-3 py-1.5 text-right text-gray-800">{count}</td>
+                    <td className="px-3 py-1.5 text-right text-gray-600">
+                      {analysis.total ? Math.round((count / analysis.total) * 1000) / 10 : 0}%
+                    </td>
                   </tr>
-                </thead>
-                <tbody>
-                  {preview.rows.map((r, i) => (
-                    <tr key={i} className={i % 2 === 0 ? 'bg-white' : 'bg-slate-50'}>
-                      {preview.columns.map((c) => (
-                        <td
-                          key={c}
-                          className="max-w-[240px] break-words border border-gray-200 px-2 py-1 align-top"
-                        >
-                          {r[c] === null || r[c] === undefined ? '' : String(r[c])}
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function DataSpreadsheet({
+  columns,
+  rows,
+}: {
+  columns: string[];
+  rows: Record<string, unknown>[];
+}) {
+  return (
+    <table className="min-w-max w-full border-collapse text-xs">
+      <thead className="sticky top-0 z-10 bg-slate-900 text-white">
+        <tr>
+          <th className="border border-slate-800 px-2 py-1.5 text-left font-semibold">#</th>
+          {columns.map((c) => (
+            <th key={c} className="border border-slate-800 px-2 py-1.5 text-left font-semibold whitespace-nowrap">
+              {c}
+            </th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((r, i) => (
+          <tr key={i} className={i % 2 === 0 ? 'bg-white' : 'bg-slate-50'}>
+            <td className="border border-gray-200 px-2 py-1 text-gray-500">{i + 1}</td>
+            {columns.map((c) => (
+              <td key={c} className="max-w-[280px] break-words border border-gray-200 px-2 py-1 align-top">
+                {r[c] === null || r[c] === undefined ? '' : String(r[c])}
+              </td>
+            ))}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function FullPageDataView({
+  title,
+  subtitle,
+  columns,
+  rows,
+  analysisColumn,
+  onAnalysisColumnChange,
+  analysis,
+  onBack,
+}: {
+  title: string;
+  subtitle?: string;
+  columns: string[];
+  rows: Record<string, unknown>[];
+  analysisColumn: string;
+  onAnalysisColumnChange: (col: string) => void;
+  analysis: ColumnAnalysis | null;
+  onBack: () => void;
+}) {
+  return (
+    <div className="flex min-h-0 flex-1 flex-col bg-white">
+      <div className="shrink-0 border-b border-gray-200 bg-white px-4 py-3 shadow-sm">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <button
+              type="button"
+              onClick={onBack}
+              className="mb-2 rounded-md border border-gray-300 bg-white px-3 py-1.5 text-xs font-medium text-gray-800 hover:bg-gray-50"
+            >
+              ← Back to list
+            </button>
+            <h2 className="text-base font-semibold text-gray-900">{title}</h2>
+            {subtitle && <p className="text-xs text-gray-600">{subtitle}</p>}
+            <p className="mt-1 text-xs text-gray-500">
+              {rows.length} rows · {columns.length} columns
+            </p>
+          </div>
+          {columns.length > 0 && (
+            <label className="flex flex-col gap-1 text-xs text-gray-700">
+              <span className="font-medium">Analyze column</span>
+              <select
+                value={analysisColumn}
+                onChange={(e) => onAnalysisColumnChange(e.target.value)}
+                className="min-w-[220px] rounded-md border border-gray-300 px-2 py-1.5 text-sm"
+              >
+                {columns.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+        </div>
+        {analysis && analysisColumn && (
+          <div className="mt-3 rounded-lg border border-indigo-100 bg-indigo-50/50 p-3">
+            <AnalysisSummary analysis={analysis} columnName={analysisColumn} />
+          </div>
+        )}
+      </div>
+      <div className="min-h-0 flex-1 overflow-auto p-2">
+        <DataSpreadsheet columns={columns} rows={rows} />
+      </div>
     </div>
   );
 }
